@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Coroutine, Literal
@@ -280,6 +281,78 @@ class ACPDispatcher:
             return content
         return f"<final>{content}</final>"
 
+    @staticmethod
+    def _to_jsonable(value: Any) -> Any:
+        """将 ACP/消息对象安全转换为 JSON 可序列化结构。"""
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, dict):
+            return {str(k): ACPDispatcher._to_jsonable(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple, set)):
+            return [ACPDispatcher._to_jsonable(v) for v in value]
+        model_dump = getattr(value, "model_dump", None)
+        if callable(model_dump):
+            try:
+                return ACPDispatcher._to_jsonable(
+                    model_dump(by_alias=True, exclude_none=True, mode="json")
+                )
+            except Exception:
+                pass
+        return str(value)
+
+    def _log_acp_json(self, *, event: str, payload: dict[str, Any]) -> None:
+        # 中文注释：统一输出 ACP 调试 JSON，便于平台侧按 event 检索与回放。
+        record = {
+            "event": event,
+            "payload": self._to_jsonable(payload),
+        }
+        logger.debug(
+            "ACP debug json {}", json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+        )
+
+    def _build_outbound_debug_payload(
+        self,
+        *,
+        msg: OutboundMessage,
+        reason: str,
+        session_key: str,
+    ) -> dict[str, Any]:
+        metadata = dict(msg.metadata or {})
+        is_tool_hint = bool(metadata.get("_tool_hint"))
+        tool_items = (
+            [line for line in msg.content.splitlines() if line.strip()] if is_tool_hint else []
+        )
+        return {
+            "reason": reason,
+            "session_key": session_key,
+            "channel": msg.channel,
+            "chat_id": msg.chat_id,
+            "content": msg.content,
+            "reply_to": msg.reply_to,
+            "media": list(msg.media or []),
+            "metadata": metadata,
+            "tool": {
+                "is_tool_hint": is_tool_hint,
+                "items": tool_items,
+                "raw": msg.content if is_tool_hint else "",
+            },
+        }
+
+    async def _publish_outbound_with_debug(
+        self,
+        *,
+        msg: OutboundMessage,
+        reason: str,
+        session_key: str,
+    ) -> None:
+        self._log_acp_json(
+            event="acp_outbound",
+            payload=self._build_outbound_debug_payload(
+                msg=msg, reason=reason, session_key=session_key
+            ),
+        )
+        await self.bus.publish_outbound(msg)
+
     async def _permission_response(self, options: list[Any]) -> Any:
         from acp.schema import RequestPermissionResponse
 
@@ -317,16 +390,39 @@ class ACPDispatcher:
 
         if isinstance(update, AgentMessageChunk) and isinstance(update.content, TextContentBlock):
             state.merge_text(update.content.text)
+            self._log_acp_json(
+                event="acp_session_update_text",
+                payload={
+                    "session_id": session_id,
+                    "text": update.content.text,
+                },
+            )
             await self._emit_progress(state.on_progress, update.content.text)
             return
 
         if isinstance(update, ToolCallStart):
             title = update.title or "tool"
+            self._log_acp_json(
+                event="acp_session_update_tool_start",
+                payload={
+                    "session_id": session_id,
+                    "title": title,
+                    "tool_call": update,
+                },
+            )
             await self._emit_progress(state.on_progress, title, tool_hint=True)
             return
 
         if isinstance(update, ToolCallProgress):
             status = getattr(update.status, "value", update.status) if update.status else None
+            self._log_acp_json(
+                event="acp_session_update_tool_progress",
+                payload={
+                    "session_id": session_id,
+                    "status": status,
+                    "tool_call": update,
+                },
+            )
             if status:
                 await self._emit_progress(state.on_progress, status, tool_hint=True)
 
@@ -496,8 +592,10 @@ class ACPDispatcher:
             except (asyncio.CancelledError, Exception):
                 pass
         content = f"⏹ Stopped {cancelled} task(s)." if cancelled else "No active task to stop."
-        await self.bus.publish_outbound(
-            OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+        await self._publish_outbound_with_debug(
+            msg=OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content),
+            reason="command_stop",
+            session_key=msg.session_key,
         )
 
     async def _dispatch(self, msg: InboundMessage) -> None:
@@ -509,46 +607,56 @@ class ACPDispatcher:
 
             command, arg = self._parse_command(msg.content)
             if command == "/help":
-                await self.bus.publish_outbound(
-                    OutboundMessage(
+                await self._publish_outbound_with_debug(
+                    msg=OutboundMessage(
                         channel=msg.channel,
                         chat_id=msg.chat_id,
                         content=self._HELP_TEXT,
-                    )
+                    ),
+                    reason="command_help",
+                    session_key=key,
                 )
                 return
             if command == "/new":
                 old_session_id = self._session_map.pop(key, None)
                 if old_session_id:
                     self._session_caps.pop(old_session_id, None)
-                await self.bus.publish_outbound(
-                    OutboundMessage(
+                await self._publish_outbound_with_debug(
+                    msg=OutboundMessage(
                         channel=msg.channel, chat_id=msg.chat_id, content="New session started."
-                    )
+                    ),
+                    reason="command_new",
+                    session_key=key,
                 )
                 return
             if command == "/models":
                 session_id = await self._ensure_session(key)
                 content = await self._list_models_command(session_id)
-                await self.bus.publish_outbound(
-                    OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+                await self._publish_outbound_with_debug(
+                    msg=OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content),
+                    reason="command_models",
+                    session_key=key,
                 )
                 return
             if command == "/agents":
                 session_id = await self._ensure_session(key)
                 content = await self._list_agents_command(session_id)
-                await self.bus.publish_outbound(
-                    OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+                await self._publish_outbound_with_debug(
+                    msg=OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content),
+                    reason="command_agents",
+                    session_key=key,
                 )
                 return
             if command == "/set_model":
                 if not arg:
-                    await self.bus.publish_outbound(
-                        OutboundMessage(
+                    await self._publish_outbound_with_debug(
+                        msg=OutboundMessage(
                             channel=msg.channel,
                             chat_id=msg.chat_id,
                             content="Usage: /set_model <model_id>",
-                        )
+                        ),
+                        reason="command_set_model_usage",
+                        session_key=key,
                     )
                     return
                 await self._ensure_connection()
@@ -558,22 +666,26 @@ class ACPDispatcher:
                 await self._conn.set_session_model(model_id=arg, session_id=session_id)
                 caps = self._session_caps.setdefault(session_id, _SessionCapabilities())
                 caps.current_model = arg
-                await self.bus.publish_outbound(
-                    OutboundMessage(
+                await self._publish_outbound_with_debug(
+                    msg=OutboundMessage(
                         channel=msg.channel,
                         chat_id=msg.chat_id,
                         content=f"Model switched to: {arg}",
-                    )
+                    ),
+                    reason="command_set_model",
+                    session_key=key,
                 )
                 return
             if command == "/set_agent":
                 if not arg:
-                    await self.bus.publish_outbound(
-                        OutboundMessage(
+                    await self._publish_outbound_with_debug(
+                        msg=OutboundMessage(
                             channel=msg.channel,
                             chat_id=msg.chat_id,
                             content="Usage: /set_agent <agent_id>",
-                        )
+                        ),
+                        reason="command_set_agent_usage",
+                        session_key=key,
                     )
                     return
                 await self._ensure_connection()
@@ -583,12 +695,14 @@ class ACPDispatcher:
                 await self._conn.set_session_mode(mode_id=arg, session_id=session_id)
                 caps = self._session_caps.setdefault(session_id, _SessionCapabilities())
                 caps.current_agent = arg
-                await self.bus.publish_outbound(
-                    OutboundMessage(
+                await self._publish_outbound_with_debug(
+                    msg=OutboundMessage(
                         channel=msg.channel,
                         chat_id=msg.chat_id,
                         content=f"Agent switched to: {arg}",
-                    )
+                    ),
+                    reason="command_set_agent",
+                    session_key=key,
                 )
                 return
 
@@ -613,16 +727,22 @@ class ACPDispatcher:
             async with lock:
                 progress_meta = dict(msg.metadata or {})
                 progress_meta["_progress"] = True
-                progress_acc = _ProgressAccumulator(
-                    idle_seconds=2.0,
-                    publish=lambda content, tool_hint: self.bus.publish_outbound(
-                        OutboundMessage(
+
+                async def _publish_progress(content: str, tool_hint: bool) -> None:
+                    await self._publish_outbound_with_debug(
+                        msg=OutboundMessage(
                             channel=msg.channel,
                             chat_id=msg.chat_id,
                             content=content,
                             metadata={**progress_meta, "_tool_hint": tool_hint},
-                        )
-                    ),
+                        ),
+                        reason="progress_tool_hint" if tool_hint else "progress_text",
+                        session_key=key,
+                    )
+
+                progress_acc = _ProgressAccumulator(
+                    idle_seconds=2.0,
+                    publish=_publish_progress,
                 )
                 send_final = (
                     True if self.channels_config is None else self.channels_config.send_final
@@ -658,37 +778,43 @@ class ACPDispatcher:
                                 len(partial),
                                 partial_esc,
                             )
-                            await self.bus.publish_outbound(
-                                OutboundMessage(
+                            await self._publish_outbound_with_debug(
+                                msg=OutboundMessage(
                                     channel=msg.channel,
                                     chat_id=msg.chat_id,
                                     content=self._format_final_content(partial),
                                     metadata=msg.metadata or {},
-                                )
+                                ),
+                                reason="final_partial",
+                                session_key=key,
                             )
                         return
                     # 中文注释：没有可用 partial 时，保持原行为向上抛错，由统一异常分支回复错误消息。
                     raise dispatch_error
 
                 if response is not None and send_final:
-                    await self.bus.publish_outbound(
-                        OutboundMessage(
+                    await self._publish_outbound_with_debug(
+                        msg=OutboundMessage(
                             channel=msg.channel,
                             chat_id=msg.chat_id,
                             content=self._format_final_content(response),
                             metadata=msg.metadata or {},
-                        )
+                        ),
+                        reason="final_response",
+                        session_key=key,
                     )
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("ACP dispatcher failed for {}", msg.session_key)
-            await self.bus.publish_outbound(
-                OutboundMessage(
+            await self._publish_outbound_with_debug(
+                msg=OutboundMessage(
                     channel=msg.channel,
                     chat_id=msg.chat_id,
                     content="Sorry, I encountered an error.",
-                )
+                ),
+                reason="dispatch_exception",
+                session_key=msg.session_key,
             )
 
     async def run(self) -> None:

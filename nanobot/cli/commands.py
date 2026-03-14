@@ -6,6 +6,7 @@ import os
 import select
 import signal
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Literal, cast
 
@@ -55,6 +56,7 @@ _SAVED_TERM_ATTRS = None  # original termios settings, restored on exit
 _CLI_CONFIG_PATH: Path | None = None
 _CLI_DISPATCHER_OVERRIDE: str | None = None
 _CLI_ACP_CONFIG_OVERRIDE: str | None = None
+_GATEWAY_FILE_LOG_SINK_ID: int | None = None
 
 
 def _flush_pending_tty_input() -> None:
@@ -459,6 +461,36 @@ def _print_deprecated_memory_window_notice(config: Config) -> None:
         )
 
 
+def _configure_gateway_log_file_from_env() -> Path | None:
+    """当设置 NANOBOT_GATEWAY_LOG_DIR 时，为每次网关启动创建独立日志文件。"""
+    raw_dir = (os.getenv("NANOBOT_GATEWAY_LOG_DIR") or "").strip()
+    if not raw_dir:
+        return None
+
+    from loguru import logger
+
+    global _GATEWAY_FILE_LOG_SINK_ID
+    if _GATEWAY_FILE_LOG_SINK_ID is not None:
+        # 中文注释：同进程内重复启动 gateway 时，先移除旧 sink，避免重复写入与资源泄漏。
+        logger.remove(_GATEWAY_FILE_LOG_SINK_ID)
+        _GATEWAY_FILE_LOG_SINK_ID = None
+
+    log_dir = Path(raw_dir).expanduser()
+    log_dir.mkdir(parents=True, exist_ok=True)
+    # 中文注释：按“启动时间 + pid”切分文件，确保每次启动互不覆盖，方便逐次审查。
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    log_path = log_dir / f"gateway-{stamp}-{os.getpid()}.log"
+    _GATEWAY_FILE_LOG_SINK_ID = logger.add(
+        str(log_path),
+        level="DEBUG",
+        enqueue=True,
+        encoding="utf-8",
+        backtrace=False,
+        diagnose=False,
+    )
+    return log_path
+
+
 # ============================================================================
 # Gateway / Server
 # ============================================================================
@@ -514,6 +546,9 @@ def gateway(
 
     runtime_config = _load_runtime_config(config, workspace, dispatcher, acp_config)
     _print_deprecated_memory_window_notice(runtime_config)
+    gateway_log_path = _configure_gateway_log_file_from_env()
+    if gateway_log_path is not None:
+        console.print(f"[dim]Gateway logs -> {gateway_log_path}[/dim]")
     port = port if port is not None else runtime_config.gateway.port
 
     console.print(f"{__logo__} Starting nanobot gateway on port {port}...")
@@ -563,6 +598,19 @@ def gateway(
         )
 
     async def on_cron_job(job: CronJob) -> str | None:
+        async def _publish_gateway_outbound(msg: Any, reason: str) -> None:
+            # 中文注释：ACP 后端时复用 dispatcher 的 JSON 调试上报；其它后端保持原行为。
+            if runtime_config.dispatch.backend == "acp" and hasattr(
+                runtime, "_publish_outbound_with_debug"
+            ):
+                await runtime._publish_outbound_with_debug(  # type: ignore[attr-defined]
+                    msg=msg,
+                    reason=reason,
+                    session_key=f"gateway:{msg.channel}:{msg.chat_id}",
+                )
+                return
+            await bus.publish_outbound(msg)
+
         response = await runtime.process_direct(
             job.payload.message,
             session_key=f"cron:{job.id}",
@@ -572,12 +620,13 @@ def gateway(
         if job.payload.deliver and job.payload.to:
             from nanobot.bus.events import OutboundMessage
 
-            await bus.publish_outbound(
+            await _publish_gateway_outbound(
                 OutboundMessage(
                     channel=job.payload.channel or "cli",
                     chat_id=job.payload.to,
                     content=response or "",
-                )
+                ),
+                reason="cron_delivery",
             )
         return response
 
@@ -627,6 +676,16 @@ def gateway(
 
         channel, chat_id = _pick_heartbeat_target()
         if channel == "cli":
+            return
+        # 中文注释：心跳通知也纳入 ACP outbound JSON 调试流，便于统一审计。
+        if runtime_config.dispatch.backend == "acp" and hasattr(
+            runtime, "_publish_outbound_with_debug"
+        ):
+            await runtime._publish_outbound_with_debug(  # type: ignore[attr-defined]
+                msg=OutboundMessage(channel=channel, chat_id=chat_id, content=response),
+                reason="heartbeat_notify",
+                session_key=f"heartbeat:{channel}:{chat_id}",
+            )
             return
         await bus.publish_outbound(
             OutboundMessage(channel=channel, chat_id=chat_id, content=response)

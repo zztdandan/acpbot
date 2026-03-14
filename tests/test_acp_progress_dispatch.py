@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from nanobot.bus.events import InboundMessage
+from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import ACPBackendConfig, ChannelsConfig
 from nanobot.dispatch.acp import ACPDispatcher, _ACPDispatchError
@@ -15,6 +15,29 @@ def test_channels_send_final_alias_parsing() -> None:
     # Given: 配置文件常用 camelCase，sendFinal 需要正确映射到 send_final。
     cfg = ChannelsConfig.model_validate({"sendFinal": False})
     assert cfg.send_final is False
+
+
+def test_acp_outbound_debug_payload_contains_tool_items() -> None:
+    # Given: _tool_hint=true 时，调试 JSON 中应显式记录 tool 的分项内容。
+    dispatcher = ACPDispatcher(
+        bus=MessageBus(),
+        workspace=Path("/tmp"),
+        acp_config=ACPBackendConfig(),
+        channels_config=ChannelsConfig(send_final=True),
+    )
+    payload = dispatcher._build_outbound_debug_payload(
+        msg=OutboundMessage(
+            channel="telegram",
+            chat_id="123",
+            content="glob\nread",
+            metadata={"_tool_hint": True, "_progress": True},
+        ),
+        reason="progress_tool_hint",
+        session_key="telegram:123",
+    )
+    assert payload["tool"]["is_tool_hint"] is True
+    assert payload["tool"]["items"] == ["glob", "read"]
+    assert payload["content"] == "glob\nread"
 
 
 @pytest.mark.asyncio
