@@ -487,7 +487,7 @@ def gateway(
     from nanobot.cron.types import CronJob
     from nanobot.dispatch import ACPDispatcher, NativeDispatcher
     from nanobot.heartbeat.service import HeartbeatService
-    from nanobot.providers.base import LLMProvider, LLMResponse
+    from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
     from nanobot.session.manager import SessionManager
 
     class _DisabledHeartbeatProvider(LLMProvider):
@@ -507,6 +507,40 @@ def gateway(
         def get_default_model(self) -> str:
             return "disabled"
 
+    class _ACPHeartbeatProvider(LLMProvider):
+        async def chat(
+            self,
+            messages: list[dict[str, object]],
+            tools: list[dict[str, object]] | None = None,
+            model: str | None = None,
+            max_tokens: int = 4096,
+            temperature: float = 0.7,
+            reasoning_effort: str | None = None,
+            tool_choice: str | dict[str, object] | None = None,
+        ) -> LLMResponse:
+            del tools, model, max_tokens, temperature, reasoning_effort, tool_choice
+            user_content = ""
+            if messages:
+                raw = messages[-1].get("content", "")
+                if isinstance(raw, str):
+                    user_content = raw
+            heartbeat_tasks = (
+                user_content.split("\n\n", 1)[1] if "\n\n" in user_content else user_content
+            )
+            return LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="hb_acp",
+                        name="heartbeat",
+                        arguments={"action": "run", "tasks": heartbeat_tasks},
+                    )
+                ],
+            )
+
+        def get_default_model(self) -> str:
+            return "acp-heartbeat"
+
     if verbose:
         import logging
 
@@ -520,9 +554,7 @@ def gateway(
     sync_workspace_templates(runtime_config.workspace_path)
     bus = MessageBus()
     provider = None
-    needs_provider = (
-        runtime_config.dispatch.backend == "native" or runtime_config.gateway.heartbeat.enabled
-    )
+    needs_provider = runtime_config.dispatch.backend == "native"
     if needs_provider:
         try:
             provider = _make_provider(runtime_config)
@@ -530,7 +562,7 @@ def gateway(
             if runtime_config.dispatch.backend == "native":
                 raise
             console.print(
-                "[yellow]Warning: No LLM provider configured, heartbeat is disabled for ACP backend.[/yellow]"
+                "[yellow]Warning: No LLM provider configured for native backend.[/yellow]"
             )
 
     session_manager = (
@@ -563,9 +595,12 @@ def gateway(
         )
 
     async def on_cron_job(job: CronJob) -> str | None:
+        session_key = f"cron:{job.id}"
+        if job.payload.session_mode == "new_each_run":
+            session_key = f"cron:{job.id}:run:{int(asyncio.get_event_loop().time() * 1000)}"
         response = await runtime.process_direct(
             job.payload.message,
-            session_key=f"cron:{job.id}",
+            session_key=session_key,
             channel=job.payload.channel or "cli",
             chat_id=job.payload.to or "direct",
         )
@@ -609,6 +644,11 @@ def gateway(
         return "cli", "direct"
 
     async def on_heartbeat_execute(tasks: str) -> str:
+        if runtime_config.dispatch.backend == "acp":
+            acp_runtime = cast(ACPDispatcher, runtime)
+            delivered = await acp_runtime.send_heartbeat_to_active_sessions(tasks)
+            return "" if delivered >= 0 else ""
+
         channel, chat_id = _pick_heartbeat_target()
 
         async def _silent(*_args, **_kwargs):
@@ -633,18 +673,23 @@ def gateway(
         )
 
     hb_cfg = runtime_config.gateway.heartbeat
-    hb_enabled = hb_cfg.enabled and provider is not None
-    if hb_cfg.enabled and provider is None:
-        console.print(
-            "[yellow]Warning: Heartbeat disabled because no provider is available.[/yellow]"
-        )
+    if runtime_config.dispatch.backend == "acp":
+        hb_enabled = hb_cfg.enabled
+        hb_provider: LLMProvider = _ACPHeartbeatProvider()
+    else:
+        hb_enabled = hb_cfg.enabled and provider is not None
+        if hb_cfg.enabled and provider is None:
+            console.print(
+                "[yellow]Warning: Heartbeat disabled because no provider is available.[/yellow]"
+            )
+        hb_provider = provider or _DisabledHeartbeatProvider()
 
     heartbeat = HeartbeatService(
         workspace=runtime_config.workspace_path,
-        provider=provider or _DisabledHeartbeatProvider(),
+        provider=hb_provider,
         model=runtime_config.agents.defaults.model,
         on_execute=on_heartbeat_execute,
-        on_notify=on_heartbeat_notify,
+        on_notify=(None if runtime_config.dispatch.backend == "acp" else on_heartbeat_notify),
         interval_s=hb_cfg.interval_s,
         enabled=hb_enabled,
     )
