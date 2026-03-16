@@ -305,11 +305,53 @@ class ACPDispatcher(_SessionMapSupport):
                 cwd=str(cwd),
                 mcp_servers=self._convert_mcp_servers(),
             )
+            session_id = response.session_id
+            logger.info(
+                "New ACP session created: {}, applying defaults: model={}, mode={}",
+                session_id,
+                self.acp_config.default_model,
+                self.acp_config.default_mode,
+            )
+
+            if self.acp_config.default_model:
+                try:
+                    logger.info("Setting session model to: {}", self.acp_config.default_model)
+                    await self._conn.set_session_model(
+                        model_id=self.acp_config.default_model, session_id=session_id
+                    )
+                    caps = self._session_caps.setdefault(session_id, _SessionCapabilities())
+                    caps.current_model = self.acp_config.default_model
+                    logger.info("Successfully set model to: {}", self.acp_config.default_model)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to set default model {} for session {}: {}",
+                        self.acp_config.default_model,
+                        session_id,
+                        e,
+                    )
+
+            if self.acp_config.default_mode:
+                try:
+                    logger.info("Setting session mode to: {}", self.acp_config.default_mode)
+                    await self._conn.set_session_mode(
+                        mode_id=self.acp_config.default_mode, session_id=session_id
+                    )
+                    caps = self._session_caps.setdefault(session_id, _SessionCapabilities())
+                    caps.current_agent = self.acp_config.default_mode
+                    logger.info("Successfully set mode to: {}", self.acp_config.default_mode)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to set default mode {} for session {}: {}",
+                        self.acp_config.default_mode,
+                        session_id,
+                        e,
+                    )
+
             # 新建映射立即持久化，避免进程异常导致映射丢失。
-            self._session_map[session_key] = response.session_id
+            self._session_map[session_key] = session_id
             self._persist_session_map()
-            self._update_caps_from_session_payload(response.session_id, response)
-            return response.session_id
+            self._update_caps_from_session_payload(session_id, response)
+            return session_id
 
     def _convert_mcp_servers(self) -> list[Any]:
         """把 nanobot MCP 配置转换为 ACP schema。"""
@@ -610,10 +652,11 @@ class ACPDispatcher(_SessionMapSupport):
             # 维护 session 维度活跃任务列表，便于 /stop 定位取消。
             self._active_tasks.setdefault(msg.session_key, []).append(task)
             task.add_done_callback(
-                lambda done, key=msg.session_key: self._active_tasks.get(key, [])
-                and self._active_tasks[key].remove(done)
-                if done in self._active_tasks.get(key, [])
-                else None
+                lambda done, key=msg.session_key: (
+                    self._active_tasks.get(key, []) and self._active_tasks[key].remove(done)
+                    if done in self._active_tasks.get(key, [])
+                    else None
+                )
             )
 
     def stop(self) -> None:
