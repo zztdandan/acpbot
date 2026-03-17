@@ -9,8 +9,8 @@
 from __future__ import annotations
 
 import asyncio
-from importlib import import_module
 import os
+from importlib import import_module
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -39,6 +39,7 @@ class ACPDispatcher(_SessionMapSupport):
         "/agents — List available/current agents\n"
         "/set_agent <agent_id> — Switch agent"
     )
+    _INBOUND_CONTROL_METADATA_KEYS = frozenset({"_acp_session_model", "_acp_session_agent"})
 
     def __init__(
         self,
@@ -101,6 +102,17 @@ class ACPDispatcher(_SessionMapSupport):
         cmd = parts[0].lower()
         arg = parts[1].strip() if len(parts) > 1 else ""
         return cmd, arg
+
+    @classmethod
+    def _sanitize_outbound_metadata(cls, metadata: dict[str, Any] | None) -> dict[str, Any]:
+        """移除仅用于 inbound 控制的 metadata，避免回传给客户端造成状态误导。"""
+        if not metadata:
+            return {}
+        return {
+            key: value
+            for key, value in metadata.items()
+            if key not in cls._INBOUND_CONTROL_METADATA_KEYS
+        }
 
     def _update_caps_from_session_payload(self, session_id: str, payload: Any) -> None:
         """从 ACP session payload 中提取模型/agent 能力缓存。"""
@@ -285,7 +297,12 @@ class ACPDispatcher(_SessionMapSupport):
                 self._session_map_bootstrapped = False
                 raise
 
-    async def _ensure_session(self, session_key: str) -> str:
+    async def _ensure_session(
+        self,
+        session_key: str,
+        preferred_model: str | None = None,
+        preferred_agent: str | None = None,
+    ) -> str:
         """确保 session_key 对应 ACP session 存在并可复用。"""
         session_id = self._session_map.get(session_key)
         if session_id:
@@ -306,43 +323,47 @@ class ACPDispatcher(_SessionMapSupport):
                 mcp_servers=self._convert_mcp_servers(),
             )
             session_id = response.session_id
+            selected_model = preferred_model or self.acp_config.default_model
+            selected_agent = preferred_agent or self.acp_config.default_mode
             logger.info(
-                "New ACP session created: {}, applying defaults: model={}, mode={}",
+                "New ACP session created: {}, applying selection: model={} (preferred={} default={}), mode={} (preferred={} default={})",
                 session_id,
+                selected_model,
+                preferred_model,
                 self.acp_config.default_model,
+                selected_agent,
+                preferred_agent,
                 self.acp_config.default_mode,
             )
 
-            if self.acp_config.default_model:
+            if selected_model:
                 try:
-                    logger.info("Setting session model to: {}", self.acp_config.default_model)
+                    # 中文注释：会话模型遵循“首帧偏好优先，配置 default 回落”。
                     await self._conn.set_session_model(
-                        model_id=self.acp_config.default_model, session_id=session_id
+                        model_id=selected_model, session_id=session_id
                     )
                     caps = self._session_caps.setdefault(session_id, _SessionCapabilities())
-                    caps.current_model = self.acp_config.default_model
-                    logger.info("Successfully set model to: {}", self.acp_config.default_model)
+                    caps.current_model = selected_model
+                    logger.info("Successfully set model to: {}", selected_model)
                 except Exception as e:
                     logger.warning(
-                        "Failed to set default model {} for session {}: {}",
-                        self.acp_config.default_model,
+                        "Failed to set selected model {} for session {}: {}",
+                        selected_model,
                         session_id,
                         e,
                     )
 
-            if self.acp_config.default_mode:
+            if selected_agent:
                 try:
-                    logger.info("Setting session mode to: {}", self.acp_config.default_mode)
-                    await self._conn.set_session_mode(
-                        mode_id=self.acp_config.default_mode, session_id=session_id
-                    )
+                    # 中文注释：会话 agent(mode) 与模型策略一致，优先使用首帧，再回落 default。
+                    await self._conn.set_session_mode(mode_id=selected_agent, session_id=session_id)
                     caps = self._session_caps.setdefault(session_id, _SessionCapabilities())
-                    caps.current_agent = self.acp_config.default_mode
-                    logger.info("Successfully set mode to: {}", self.acp_config.default_mode)
+                    caps.current_agent = selected_agent
+                    logger.info("Successfully set mode to: {}", selected_agent)
                 except Exception as e:
                     logger.warning(
-                        "Failed to set default mode {} for session {}: {}",
-                        self.acp_config.default_mode,
+                        "Failed to set selected mode {} for session {}: {}",
+                        selected_agent,
                         session_id,
                         e,
                     )
@@ -402,6 +423,8 @@ class ACPDispatcher(_SessionMapSupport):
         session_key: str = "cli:direct",
         channel: str = "cli",
         chat_id: str = "direct",
+        preferred_model: str | None = None,
+        preferred_agent: str | None = None,
         on_progress: Callable[[str], Awaitable[None]] | None = None,
     ) -> str:
         """直接发送一轮 prompt 到指定 session，并返回聚合后的文本。"""
@@ -409,7 +432,11 @@ class ACPDispatcher(_SessionMapSupport):
         await self._ensure_connection()
         if self._conn is None:
             raise RuntimeError("ACP connection is not available")
-        session_id = await self._ensure_session(session_key)
+        session_id = await self._ensure_session(
+            session_key,
+            preferred_model=preferred_model,
+            preferred_agent=preferred_agent,
+        )
         # 注册会话级流式状态，供 session_update 回调写入。
         state = _StreamState(on_progress=on_progress)
         self._session_states[session_id] = state
@@ -580,12 +607,28 @@ class ACPDispatcher(_SessionMapSupport):
             # 每个会话串行执行，避免同一会话并发 prompt 互相覆盖状态。
             lock = self._process_locks.setdefault(key, asyncio.Lock())
             async with lock:
+                metadata = msg.metadata or {}
+                # 中文注释：WS 首帧透传偏好时，仅在“首次创建 ACP session”阶段参与默认选择。
+                preferred_model_raw = metadata.get("_acp_session_model")
+                preferred_agent_raw = metadata.get("_acp_session_agent")
+                preferred_model = (
+                    str(preferred_model_raw).strip()
+                    if isinstance(preferred_model_raw, str) and preferred_model_raw.strip()
+                    else None
+                )
+                preferred_agent = (
+                    str(preferred_agent_raw).strip()
+                    if isinstance(preferred_agent_raw, str) and preferred_agent_raw.strip()
+                    else None
+                )
                 try:
                     response = await self.process_direct(
                         msg.content,
                         session_key=key,
                         channel=msg.channel,
                         chat_id=msg.chat_id,
+                        preferred_model=preferred_model,
+                        preferred_agent=preferred_agent,
                     )
                 except _ACPDispatchError as exc:
                     # ACP 异常时优先尝试输出 partial，减少用户感知中断。
@@ -607,7 +650,7 @@ class ACPDispatcher(_SessionMapSupport):
                                 channel=msg.channel,
                                 chat_id=msg.chat_id,
                                 content=partial,
-                                metadata=msg.metadata or {},
+                                metadata=self._sanitize_outbound_metadata(msg.metadata),
                             )
                         )
                         return
@@ -617,7 +660,7 @@ class ACPDispatcher(_SessionMapSupport):
                     channel=msg.channel,
                     chat_id=msg.chat_id,
                     content=response,
-                    metadata=msg.metadata or {},
+                    metadata=self._sanitize_outbound_metadata(msg.metadata),
                 )
             )
         except asyncio.CancelledError:

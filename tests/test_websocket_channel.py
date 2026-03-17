@@ -85,6 +85,54 @@ async def test_connection_can_switch_chat_and_publish_inbound() -> None:
 
 
 @pytest.mark.asyncio
+async def test_auth_first_frame_can_set_acp_preferences_for_inbound_metadata() -> None:
+    channel = _make_channel(allow_from=["*"], tokens=["ok-token"])
+    conn = _FakeConnection(
+        incoming=[
+            json.dumps(
+                {
+                    "type": "auth",
+                    "token": "ok-token",
+                    "principalId": "u-2",
+                    "model": "anthropic/claude-sonnet-4",
+                    "agent": "build",
+                }
+            ),
+            json.dumps({"type": "send", "chatId": "chat-C", "content": "hello C"}),
+            RuntimeError("client done"),
+        ]
+    )
+
+    await channel._on_connection(conn)
+
+    msg = await asyncio.wait_for(channel.bus.consume_inbound(), timeout=1)
+    # 中文注释：验证 WS 首帧中的 model/agent 已注入 metadata，供 ACP 首次建会话选默认策略。
+    assert msg.metadata["_acp_session_model"] == "anthropic/claude-sonnet-4"
+    assert msg.metadata["_acp_session_agent"] == "build"
+
+
+@pytest.mark.asyncio
+async def test_auth_ack_send_failure_still_cleans_connection_state() -> None:
+    channel = _make_channel(allow_from=["*"], tokens=["ok-token"])
+    conn = _FakeConnection(
+        incoming=[json.dumps({"type": "auth", "token": "ok-token", "principalId": "u-3"})]
+    )
+
+    async def _fail_send(payload: str) -> None:
+        del payload
+        raise RuntimeError("send failed")
+
+    conn.send = _fail_send  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="send failed"):
+        await channel._on_connection(conn)
+
+    assert conn not in channel._connections
+    assert conn not in channel._connection_principals
+    assert conn not in channel._connection_acp_preferences
+
+
+@pytest.mark.asyncio
 async def test_outbound_only_fanout_to_subscribed_chat() -> None:
     channel = _make_channel(allow_from=["*"], tokens=["ok-token"])
     conn_a = _FakeConnection(incoming=[])

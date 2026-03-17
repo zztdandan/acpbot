@@ -76,6 +76,8 @@ class WebSocketChannel(BaseChannel):
         self._connection_queues: dict[Any, asyncio.Queue[_OutboundFrame]] = {}
         self._writer_tasks: dict[Any, asyncio.Task[None]] = {}
         self._connection_principals: dict[Any, str] = {}
+        # 中文注释：记录连接首帧传入的 ACP 会话偏好（agent/model），供首次建会话时透传。
+        self._connection_acp_preferences: dict[Any, dict[str, str]] = {}
         self._current_chat: dict[Any, str] = {}
         # 中文注释：chat_id -> 订阅连接集合，用于多人并发与多会话并存场景。
         self._chat_subscribers: dict[str, set[Any]] = {}
@@ -176,11 +178,10 @@ class WebSocketChannel(BaseChannel):
             return
 
         await self._register_connection(connection, principal)
-        await connection.send(
-            json.dumps({"type": "authed", "principalId": principal}, ensure_ascii=False)
-        )
-
         try:
+            await connection.send(
+                json.dumps({"type": "authed", "principalId": principal}, ensure_ascii=False)
+            )
             while True:
                 try:
                     raw = await asyncio.wait_for(
@@ -234,6 +235,15 @@ class WebSocketChannel(BaseChannel):
         if not self.is_allowed(principal):
             await connection.close(code=1008, reason="principal not allowed")
             return None
+        # 中文注释：首帧可选携带 agent/model；仅记录非空字符串，后续按“首帧优先，default 回落”策略使用。
+        model = str(data.get("model") or "").strip()
+        agent = str(data.get("agent") or "").strip()
+        prefs: dict[str, str] = {}
+        if model:
+            prefs["model"] = model
+        if agent:
+            prefs["agent"] = agent
+        self._connection_acp_preferences[connection] = prefs
         return principal
 
     async def _register_connection(self, connection: Any, principal: str) -> None:
@@ -256,6 +266,7 @@ class WebSocketChannel(BaseChannel):
 
         self._connections.discard(connection)
         self._connection_principals.pop(connection, None)
+        self._connection_acp_preferences.pop(connection, None)
         self._current_chat.pop(connection, None)
 
         queue = self._connection_queues.pop(connection, None)
@@ -340,6 +351,11 @@ class WebSocketChannel(BaseChannel):
             metadata_raw = data.get("metadata")
             metadata: dict[str, Any] = metadata_raw if isinstance(metadata_raw, dict) else {}
             metadata["_websocket_request_id"] = data.get("requestId")
+            prefs = self._connection_acp_preferences.get(connection, {})
+            if prefs.get("model"):
+                metadata["_acp_session_model"] = prefs["model"]
+            if prefs.get("agent"):
+                metadata["_acp_session_agent"] = prefs["agent"]
 
             await self._handle_message(
                 sender_id=self._connection_principals.get(connection, "unknown"),

@@ -36,6 +36,12 @@
       <button id="unsubBtn" class="secondary">unsubscribe</button>
     </div>
     <div class="row">
+      <label>首帧 agent</label>
+      <input id="authAgent" style="min-width:260px" placeholder="可选，如 build" />
+      <label>首帧 model</label>
+      <input id="authModel" style="min-width:360px" placeholder="可选，如 anthropic/claude-sonnet-4" />
+    </div>
+    <div class="row">
       <label>消息</label>
       <input id="content" style="min-width:600px" value="你好，做一条ws e2e测试回复。" />
       <button id="sendBtn">send</button>
@@ -74,7 +80,12 @@
       ws = new WebSocket(url);
       ws.onopen = () => {
         log(`[OPEN] ${url}`);
-        sendFrame({ type: "auth", token });
+        const authFrame = { type: "auth", token };
+        const authAgent = $("authAgent").value.trim();
+        const authModel = $("authModel").value.trim();
+        if (authAgent) authFrame.agent = authAgent;
+        if (authModel) authFrame.model = authModel;
+        sendFrame(authFrame);
       };
       ws.onmessage = (evt) => log(`[RECV] ${evt.data}`);
       ws.onclose = (evt) => log(`[CLOSE] code=${evt.code} reason=${evt.reason}`);
