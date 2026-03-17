@@ -66,29 +66,39 @@ class CronTool(Tool):
                     "description": "ISO datetime for one-time execution (e.g. '2026-02-12T10:30:00')",
                 },
                 "job_id": {"type": "string", "description": "Job ID (for remove)"},
+                "session_mode": {
+                    "type": "string",
+                    "enum": ["continue", "new_each_run"],
+                    "description": "Session strategy for each run: continue existing context or start fresh",
+                },
             },
             "required": ["action"],
         }
 
-    async def execute(
-        self,
-        action: str,
-        message: str = "",
-        every_seconds: int | None = None,
-        cron_expr: str | None = None,
-        tz: str | None = None,
-        at: str | None = None,
-        job_id: str | None = None,
-        **kwargs: Any,
-    ) -> str:
+    async def execute(self, **kwargs: Any) -> str:
+        action = str(kwargs.get("action", ""))
+        message = str(kwargs.get("message", ""))
+        every_seconds = kwargs.get("every_seconds")
+        cron_expr = kwargs.get("cron_expr")
+        tz = kwargs.get("tz")
+        at = kwargs.get("at")
+        job_id = kwargs.get("job_id")
+        session_mode = str(kwargs.get("session_mode", "continue"))
         if action == "add":
             if self._in_cron_context.get():
                 return "Error: cannot schedule new jobs from within a cron job execution"
-            return self._add_job(message, every_seconds, cron_expr, tz, at)
+            return self._add_job(
+                message,
+                every_seconds if isinstance(every_seconds, int) else None,
+                str(cron_expr) if isinstance(cron_expr, str) else None,
+                str(tz) if isinstance(tz, str) else None,
+                str(at) if isinstance(at, str) else None,
+                session_mode,
+            )
         elif action == "list":
             return self._list_jobs()
         elif action == "remove":
-            return self._remove_job(job_id)
+            return self._remove_job(str(job_id) if isinstance(job_id, str) else None)
         return f"Unknown action: {action}"
 
     def _add_job(
@@ -98,6 +108,7 @@ class CronTool(Tool):
         cron_expr: str | None,
         tz: str | None,
         at: str | None,
+        session_mode: str,
     ) -> str:
         if not message:
             return "Error: message is required for add"
@@ -136,6 +147,7 @@ class CronTool(Tool):
             name=message[:30],
             schedule=schedule,
             message=message,
+            session_mode=("new_each_run" if session_mode == "new_each_run" else "continue"),
             deliver=True,
             channel=self._channel,
             to=self._chat_id,

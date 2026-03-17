@@ -182,6 +182,8 @@ class ACPBackendConfig(Base):
     protocol_version: int = 1
     permissions_policy: Literal["strict", "trusted", "yolo"] = "strict"
     startup_timeout_seconds: int = 20
+    default_model: str = "xaio/Kimi-K2.5"
+    default_mode: str = "OpenCode-Builder"
 
 
 class DispatchConfig(Base):

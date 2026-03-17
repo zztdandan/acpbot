@@ -32,6 +32,25 @@ def test_add_job_accepts_valid_timezone(tmp_path) -> None:
     assert job.state.next_run_at_ms is not None
 
 
+def test_job_session_mode_persists_and_reloads(tmp_path) -> None:
+    store_path = tmp_path / "cron" / "jobs.json"
+    service = CronService(store_path)
+
+    created = service.add_job(
+        name="fresh session",
+        schedule=CronSchedule(kind="every", every_ms=1000),
+        message="hello",
+        session_mode="new_each_run",
+    )
+
+    assert created.payload.session_mode == "new_each_run"
+
+    reloaded = CronService(store_path)
+    jobs = reloaded.list_jobs(include_disabled=True)
+    assert len(jobs) == 1
+    assert jobs[0].payload.session_mode == "new_each_run"
+
+
 @pytest.mark.asyncio
 async def test_running_service_honors_external_disable(tmp_path) -> None:
     store_path = tmp_path / "cron" / "jobs.json"
