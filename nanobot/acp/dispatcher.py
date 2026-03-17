@@ -12,7 +12,7 @@ import asyncio
 import os
 from importlib import import_module
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, cast
 
 from loguru import logger
 
@@ -91,6 +91,16 @@ class ACPDispatcher(_SessionMapSupport):
     def _acp_text_block(content: str) -> Any:
         """延迟导入 ACP text_block，避免模块导入期强依赖 ACP。"""
         return import_module("acp").text_block(content)
+
+    @staticmethod
+    def _is_invalid_params_request_error(exc: Exception) -> bool:
+        """识别 ACP JSON-RPC invalid params（兼容不同 SDK 异常类型实现）。"""
+        # 中文注释：python-sdk 的 RequestError 会挂 code=-32602。
+        # 这里不强依赖具体类导入，避免把 dispatcher 和 SDK 实现细节绑死。
+        code = getattr(exc, "code", None)
+        if code == -32602:
+            return True
+        return str(exc).strip().lower() == "invalid params"
 
     @staticmethod
     def _parse_command(content: str) -> tuple[str, str]:
@@ -306,14 +316,26 @@ class ACPDispatcher(_SessionMapSupport):
         """确保 session_key 对应 ACP session 存在并可复用。"""
         session_id = self._session_map.get(session_key)
         if session_id:
-            return session_id
+            if await self._activate_existing_session(
+                session_key=session_key, session_id=session_id
+            ):
+                return session_id
+            self._session_map.pop(session_key, None)
+            self._session_caps.pop(session_id, None)
+            self._persist_session_map()
 
         # 每个 session_key 单独加锁，避免并发创建重复会话。
         lock = self._session_locks.setdefault(session_key, asyncio.Lock())
         async with lock:
             session_id = self._session_map.get(session_key)
             if session_id:
-                return session_id
+                if await self._activate_existing_session(
+                    session_key=session_key, session_id=session_id
+                ):
+                    return session_id
+                self._session_map.pop(session_key, None)
+                self._session_caps.pop(session_id, None)
+                self._persist_session_map()
             await self._ensure_connection()
             if self._conn is None:
                 raise RuntimeError("ACP connection is not available")
@@ -373,6 +395,82 @@ class ACPDispatcher(_SessionMapSupport):
             self._persist_session_map()
             self._update_caps_from_session_payload(session_id, response)
             return session_id
+
+    async def _activate_existing_session(self, *, session_key: str, session_id: str) -> bool:
+        """尝试把已映射 session 激活到 ACP 当前进程内存态。"""
+        await self._ensure_connection()
+        if self._conn is None:
+            raise RuntimeError("ACP connection is not available")
+
+        cwd = self._resolved_acp_cwd()
+        mcp_servers = self._convert_mcp_servers()
+        resume_session = cast(
+            Callable[..., Awaitable[Any]] | None,
+            getattr(self._conn, "resume_session", None),
+        )
+        load_session = cast(
+            Callable[..., Awaitable[Any]] | None,
+            getattr(self._conn, "load_session", None),
+        )
+
+        # 中文注释：兼容不支持 resume/load 的测试桩或旧后端，保持既有复用行为。
+        if resume_session is None and load_session is None:
+            logger.debug(
+                "ACP existing session activation skipped session_key={} session_id={} reason=no_resume_or_load_method",
+                session_key,
+                session_id,
+            )
+            return True
+
+        resume_exc: Exception | None = None
+        if resume_session is not None:
+            try:
+                response = await resume_session(
+                    cwd=cwd,
+                    session_id=session_id,
+                    mcp_servers=mcp_servers,
+                )
+                self._update_caps_from_session_payload(session_id, response)
+                return True
+            except Exception as exc:
+                resume_exc = exc
+                logger.debug(
+                    "ACP resume_session failed session_key={} session_id={} error_type={} error={}",
+                    session_key,
+                    session_id,
+                    type(exc).__name__,
+                    exc,
+                )
+
+        if load_session is not None:
+            try:
+                response = await load_session(
+                    cwd=cwd,
+                    session_id=session_id,
+                    mcp_servers=mcp_servers,
+                )
+                self._update_caps_from_session_payload(session_id, response)
+                return True
+            except Exception as load_exc:
+                logger.warning(
+                    "ACP existing session activation failed session_key={} session_id={} resume_error_type={} resume_error={} load_error_type={} load_error={}",
+                    session_key,
+                    session_id,
+                    type(resume_exc).__name__ if resume_exc is not None else "n/a",
+                    resume_exc if resume_exc is not None else "n/a",
+                    type(load_exc).__name__,
+                    load_exc,
+                )
+                return False
+
+        logger.warning(
+            "ACP existing session activation failed session_key={} session_id={} reason=resume_not_available resume_error_type={} resume_error={}",
+            session_key,
+            session_id,
+            type(resume_exc).__name__ if resume_exc is not None else "n/a",
+            resume_exc if resume_exc is not None else "n/a",
+        )
+        return False
 
     def _convert_mcp_servers(self) -> list[Any]:
         """把 nanobot MCP 配置转换为 ACP schema。"""
@@ -440,6 +538,7 @@ class ACPDispatcher(_SessionMapSupport):
         # 注册会话级流式状态，供 session_update 回调写入。
         state = _StreamState(on_progress=on_progress)
         self._session_states[session_id] = state
+        tracked_session_ids = {session_id}
         try:
             # 日志中对原文做转义和截断，避免污染终端。
             content_esc = content.encode("unicode_escape", "ignore").decode("ascii")
@@ -453,28 +552,55 @@ class ACPDispatcher(_SessionMapSupport):
                 content_esc,
             )
 
-            try:
-                await self._conn.prompt(
-                    prompt=[self._acp_text_block(content)],
-                    session_id=session_id,
-                )
-            except Exception as exc:
-                # 如果 ACP 中断但已有部分文本，交给上层决定是否回退输出。
-                partial_esc = state.final().encode("unicode_escape", "ignore").decode("ascii")
-                if len(partial_esc) > 320:
-                    partial_esc = f"{partial_esc[:320]}..."
-                logger.warning(
-                    "ACP prompt failed session_key={} session_id={} partial_chars={} partial_esc='{}'",
-                    session_key,
-                    session_id,
-                    len(state.final()),
-                    partial_esc,
-                )
-                raise _ACPDispatchError(partial_response=state.final()) from exc
+            for attempt in range(2):
+                try:
+                    await self._conn.prompt(
+                        prompt=[self._acp_text_block(content)],
+                        session_id=session_id,
+                    )
+                    break
+                except Exception as exc:
+                    # 中文注释：历史 session 映射在某些后端重启场景会失效，
+                    # 这里对 invalid params 做一次“删映射+重建会话”的自愈重试。
+                    if attempt == 0 and self._is_invalid_params_request_error(exc):
+                        stale_session_id = self._session_map.get(session_key)
+                        if stale_session_id == session_id:
+                            self._session_map.pop(session_key, None)
+                            self._session_caps.pop(session_id, None)
+                            self._persist_session_map()
+                        self._session_states.pop(session_id, None)
+                        session_id = await self._ensure_session(
+                            session_key,
+                            preferred_model=preferred_model,
+                            preferred_agent=preferred_agent,
+                        )
+                        tracked_session_ids.add(session_id)
+                        self._session_states[session_id] = state
+                        logger.warning(
+                            "ACP prompt retry with new session_key={} old_session_id={} new_session_id={}",
+                            session_key,
+                            stale_session_id,
+                            session_id,
+                        )
+                        continue
+
+                    # 如果 ACP 中断但已有部分文本，交给上层决定是否回退输出。
+                    partial_esc = state.final().encode("unicode_escape", "ignore").decode("ascii")
+                    if len(partial_esc) > 320:
+                        partial_esc = f"{partial_esc[:320]}..."
+                    logger.warning(
+                        "ACP prompt failed session_key={} session_id={} partial_chars={} partial_esc='{}'",
+                        session_key,
+                        session_id,
+                        len(state.final()),
+                        partial_esc,
+                    )
+                    raise _ACPDispatchError(partial_response=state.final()) from exc
             return state.final()
         finally:
             # 请求结束后清理 session 状态，避免跨请求串流。
-            self._session_states.pop(session_id, None)
+            for tracked_session_id in tracked_session_ids:
+                self._session_states.pop(tracked_session_id, None)
 
     async def _handle_stop(self, msg: InboundMessage) -> None:
         """停止当前 session_key 下仍在运行的任务。"""
