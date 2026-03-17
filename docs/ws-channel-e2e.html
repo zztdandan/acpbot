@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>nanobot WS Channel E2E</title>
+  <style>
+    body { font-family: "Segoe UI", sans-serif; margin: 24px; background: #f6f8fb; color: #1b2430; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+    input, textarea, button { padding: 8px 10px; border: 1px solid #c7d0dd; border-radius: 8px; }
+    textarea { width: 100%; min-height: 180px; background: #0b1220; color: #d9e5ff; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    button { cursor: pointer; background: #2a66ff; color: #fff; border: none; }
+    button.secondary { background: #4b5563; }
+    .card { background: #fff; padding: 14px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,.06); }
+    label { min-width: 80px; align-self: center; }
+  </style>
+</head>
+<body>
+  <h2>nanobot WebSocket Channel E2E 测试页</h2>
+  <div class="card">
+    <div class="row">
+      <label>WS URL</label>
+      <input id="wsUrl" style="min-width:420px" value="ws://127.0.0.1:18790/ws" />
+      <label>Token</label>
+      <input id="token" style="min-width:260px" value="ws-dev-token" />
+      <button id="connectBtn">连接</button>
+      <button id="closeBtn" class="secondary">断开</button>
+    </div>
+    <div class="row">
+      <label>chatId</label>
+      <input id="chatId" style="min-width:260px" value="web-chat-a" />
+      <label>sessionKey</label>
+      <input id="sessionKey" style="min-width:360px" placeholder="可选，如 websocket:web-chat-a:tab-1" />
+      <button id="bindBtn">bind_chat</button>
+      <button id="subBtn" class="secondary">subscribe</button>
+      <button id="unsubBtn" class="secondary">unsubscribe</button>
+    </div>
+    <div class="row">
+      <label>消息</label>
+      <input id="content" style="min-width:600px" value="你好，做一条ws e2e测试回复。" />
+      <button id="sendBtn">send</button>
+      <button id="stopBtn" class="secondary">stop</button>
+      <button id="pingBtn" class="secondary">ping</button>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <div class="row">
+      <button id="clearBtn" class="secondary">清空日志</button>
+    </div>
+    <textarea id="log" readonly></textarea>
+  </div>
+
+  <script>
+    let ws = null;
+    const $ = (id) => document.getElementById(id);
+    const log = (msg) => {
+      const now = new Date().toISOString();
+      $("log").value += `[${now}] ${msg}\n`;
+      $("log").scrollTop = $("log").scrollHeight;
+    };
+    const sendFrame = (frame) => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        log("[ERR] ws 未连接");
+        return;
+      }
+      ws.send(JSON.stringify(frame));
+      log(`[SEND] ${JSON.stringify(frame)}`);
+    };
+
+    $("connectBtn").onclick = () => {
+      const url = $("wsUrl").value.trim();
+      const token = $("token").value.trim();
+      ws = new WebSocket(url);
+      ws.onopen = () => {
+        log(`[OPEN] ${url}`);
+        sendFrame({ type: "auth", token });
+      };
+      ws.onmessage = (evt) => log(`[RECV] ${evt.data}`);
+      ws.onclose = (evt) => log(`[CLOSE] code=${evt.code} reason=${evt.reason}`);
+      ws.onerror = () => log("[ERR] websocket error");
+    };
+    $("closeBtn").onclick = () => ws && ws.close();
+    $("bindBtn").onclick = () => sendFrame({ type: "bind_chat", chatId: $("chatId").value.trim() });
+    $("subBtn").onclick = () => sendFrame({ type: "subscribe", chatId: $("chatId").value.trim() });
+    $("unsubBtn").onclick = () => sendFrame({ type: "unsubscribe", chatId: $("chatId").value.trim() });
+    $("sendBtn").onclick = () => {
+      const frame = {
+        type: "send",
+        chatId: $("chatId").value.trim(),
+        content: $("content").value,
+        requestId: `req-${Date.now()}`
+      };
+      const sk = $("sessionKey").value.trim();
+      if (sk) frame.sessionKey = sk;
+      sendFrame(frame);
+    };
+    $("stopBtn").onclick = () => sendFrame({ type: "stop", chatId: $("chatId").value.trim(), requestId: `stop-${Date.now()}` });
+    $("pingBtn").onclick = () => sendFrame({ type: "ping" });
+    $("clearBtn").onclick = () => ($("log").value = "");
+  </script>
+</body>
+</html>
