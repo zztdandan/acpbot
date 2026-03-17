@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from typer.testing import CliRunner
 
-from nanobot.cli.commands import app
+from nanobot.cli.commands import _configure_gateway_log_file_from_env, app
 from nanobot.config.schema import Config
 from nanobot.providers.litellm_provider import LiteLLMProvider
 from nanobot.providers.openai_codex_provider import _strip_model_prefix
@@ -506,6 +506,35 @@ def test_gateway_cli_port_overrides_configured_port(monkeypatch, tmp_path: Path)
 
     assert isinstance(result.exception, _StopGateway)
     assert "port 18792" in result.stdout
+
+
+def test_configure_gateway_log_file_from_env_returns_none_when_unset(monkeypatch) -> None:
+    # Given: 未设置环境变量时，不应创建日志文件。
+    monkeypatch.delenv("NANOBOT_GATEWAY_LOG_DIR", raising=False)
+    assert _configure_gateway_log_file_from_env() is None
+
+
+def test_configure_gateway_log_file_from_env_creates_timestamped_file(
+    monkeypatch, tmp_path: Path
+) -> None:
+    # Given: 设置日志目录后，应按“时间戳+pid”创建新日志文件，并注册 loguru sink。
+    monkeypatch.setenv("NANOBOT_GATEWAY_LOG_DIR", str(tmp_path))
+    calls: dict[str, str] = {}
+
+    def _fake_add(path: str, **kwargs):
+        calls["path"] = path
+        calls["level"] = kwargs.get("level", "")
+        return 1
+
+    monkeypatch.setattr("loguru.logger.add", _fake_add)
+    log_path = _configure_gateway_log_file_from_env()
+
+    assert log_path is not None
+    assert log_path.parent == tmp_path
+    assert log_path.name.startswith("gateway-")
+    assert log_path.suffix == ".log"
+    assert calls["path"] == str(log_path)
+    assert calls["level"] == "DEBUG"
 
 
 def test_gateway_acp_heartbeat_does_not_require_provider(monkeypatch, tmp_path: Path) -> None:

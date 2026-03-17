@@ -25,6 +25,7 @@ class ChannelsConfig(Base):
 
     send_progress: bool = True  # stream agent's text progress to the channel
     send_tool_hints: bool = False  # stream tool-call hints (e.g. read_file("…"))
+    send_final: bool = True  # 是否发送 final 消息（用于避免上游/下游重复展示）
 
 
 class AgentDefaults(Base):
