@@ -56,9 +56,11 @@ async def test_acp_progress_flush_on_type_switch_and_final_wrapper() -> None:
         session_key: str = "cli:direct",
         channel: str = "cli",
         chat_id: str = "direct",
+        preferred_model: str | None = None,
+        preferred_agent: str | None = None,
         on_progress=None,
     ) -> str:
-        del content, session_key, channel, chat_id
+        del content, session_key, channel, chat_id, preferred_model, preferred_agent
         assert on_progress is not None
         await on_progress("alpha ")
         await on_progress("beta")
@@ -104,9 +106,11 @@ async def test_acp_progress_deadman_flush_after_idle_2s() -> None:
         session_key: str = "cli:direct",
         channel: str = "cli",
         chat_id: str = "direct",
+        preferred_model: str | None = None,
+        preferred_agent: str | None = None,
         on_progress=None,
     ) -> str:
-        del content, session_key, channel, chat_id
+        del content, session_key, channel, chat_id, preferred_model, preferred_agent
         assert on_progress is not None
         await on_progress("idle-flush")
         await asyncio.sleep(2.2)
@@ -141,9 +145,11 @@ async def test_acp_can_disable_final_by_config() -> None:
         session_key: str = "cli:direct",
         channel: str = "cli",
         chat_id: str = "direct",
+        preferred_model: str | None = None,
+        preferred_agent: str | None = None,
         on_progress=None,
     ) -> str:
-        del content, session_key, channel, chat_id
+        del content, session_key, channel, chat_id, preferred_model, preferred_agent
         assert on_progress is not None
         await on_progress("only-progress")
         return "hidden-final"
@@ -178,9 +184,11 @@ async def test_acp_dispatch_error_without_partial_keeps_error_reply() -> None:
         session_key: str = "cli:direct",
         channel: str = "cli",
         chat_id: str = "direct",
+        preferred_model: str | None = None,
+        preferred_agent: str | None = None,
         on_progress=None,
     ) -> str:
-        del content, session_key, channel, chat_id, on_progress
+        del content, session_key, channel, chat_id, preferred_model, preferred_agent, on_progress
         raise _ACPDispatchError(partial_response="")
 
     dispatcher.process_direct = fake_process_direct  # type: ignore[method-assign]
@@ -209,9 +217,11 @@ async def test_acp_partial_with_send_final_false_emits_no_error() -> None:
         session_key: str = "cli:direct",
         channel: str = "cli",
         chat_id: str = "direct",
+        preferred_model: str | None = None,
+        preferred_agent: str | None = None,
         on_progress=None,
     ) -> str:
-        del content, session_key, channel, chat_id, on_progress
+        del content, session_key, channel, chat_id, preferred_model, preferred_agent, on_progress
         raise _ACPDispatchError(partial_response="partial-ready")
 
     dispatcher.process_direct = fake_process_direct  # type: ignore[method-assign]

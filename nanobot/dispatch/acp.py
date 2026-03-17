@@ -5,6 +5,7 @@
 """
 
 from nanobot.acp.dispatcher import ACPDispatcher, _SessionCapabilities
+from nanobot.acp.state import _ACPDispatchError
 
 # 旧路径兼容导出，避免现有调用方中断。
-__all__ = ["ACPDispatcher", "_SessionCapabilities"]
+__all__ = ["ACPDispatcher", "_SessionCapabilities", "_ACPDispatchError"]

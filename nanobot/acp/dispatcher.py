@@ -17,6 +17,8 @@ from typing import Any, Awaitable, Callable, cast
 from loguru import logger
 
 from nanobot.acp.client import _NanobotACPClient
+from nanobot.acp.observability import _ACPObservabilityMixin
+from nanobot.acp.progress import _ProgressAccumulator
 from nanobot.acp.session_map import _SessionMapSupport
 from nanobot.acp.state import _ACPDispatchError, _SessionCapabilities, _StreamState
 from nanobot.bus.events import InboundMessage, OutboundMessage
@@ -25,7 +27,7 @@ from nanobot.config.paths import get_data_dir
 from nanobot.config.schema import ACPBackendConfig, ChannelsConfig, MCPServerConfig
 
 
-class ACPDispatcher(_SessionMapSupport):
+class ACPDispatcher(_SessionMapSupport, _ACPObservabilityMixin):
     """ACP backend 的运行时分发器。"""
 
     # ACP 模式下可用的 slash 命令帮助文本。
@@ -73,6 +75,12 @@ class ACPDispatcher(_SessionMapSupport):
         self.last_target: tuple[str, str] | None = None
         self._session_map_file = get_data_dir() / "acp-session-map.json"
         self._session_map_bootstrapped = False
+        # 中文注释：记录 session_id -> session_key 的映射，用于把 session_update 工具事件回填到会话审计。
+        self._session_id_to_session_key: dict[str, str] = {}
+        # 中文注释：记录 session_id 当前活跃工具名，便于 ToolCallProgress 归档到对应工具文件。
+        self._session_active_tool_name: dict[str, str] = {}
+        # 中文注释：审计文件状态由可观测性 mixin 统一维护，避免主调度器继续膨胀。
+        self._init_observability_state()
 
     @staticmethod
     def _pick(obj: Any, *names: str) -> Any:
@@ -238,17 +246,65 @@ class ACPDispatcher(_SessionMapSupport):
         if isinstance(update, AgentMessageChunk) and isinstance(update.content, TextContentBlock):
             # 文本分片进入去重合并，并按需流式回调给上层。
             state.merge_text(update.content.text)
+            self._log_acp_json(
+                event="acp_session_update_text",
+                payload={
+                    "session_id": session_id,
+                    "text": update.content.text,
+                },
+            )
             await self._emit_progress(state.on_progress, update.content.text)
             return
 
         if isinstance(update, ToolCallStart):
             # tool start/progress 走 tool_hint 通道，便于前端区分展示。
             title = update.title or "tool"
+            tool_name = self._extract_tool_name(update)
+            self._session_active_tool_name[session_id] = tool_name
+            self._log_acp_json(
+                event="acp_session_update_tool_start",
+                payload={
+                    "session_id": session_id,
+                    "title": title,
+                    "tool_name": tool_name,
+                    "tool_call": update,
+                },
+            )
+            await self._audit_tool_event(
+                tool_name=tool_name,
+                session_id=session_id,
+                event="tool_start",
+                payload={
+                    "title": title,
+                    "tool_call": update,
+                },
+            )
             await self._emit_progress(state.on_progress, title, tool_hint=True)
             return
 
         if isinstance(update, ToolCallProgress):
             status = getattr(update.status, "value", update.status) if update.status else None
+            tool_name = self._extract_tool_name(update)
+            if tool_name == "unknown_tool":
+                tool_name = self._session_active_tool_name.get(session_id, "unknown_tool")
+            self._log_acp_json(
+                event="acp_session_update_tool_progress",
+                payload={
+                    "session_id": session_id,
+                    "status": status,
+                    "tool_name": tool_name,
+                    "tool_call": update,
+                },
+            )
+            await self._audit_tool_event(
+                tool_name=tool_name,
+                session_id=session_id,
+                event="tool_progress",
+                payload={
+                    "status": status,
+                    "tool_call": update,
+                },
+            )
             if status:
                 await self._emit_progress(state.on_progress, status, tool_hint=True)
 
@@ -538,6 +594,7 @@ class ACPDispatcher(_SessionMapSupport):
         # 注册会话级流式状态，供 session_update 回调写入。
         state = _StreamState(on_progress=on_progress)
         self._session_states[session_id] = state
+        self._session_id_to_session_key[session_id] = session_key
         tracked_session_ids = {session_id}
         try:
             # 日志中对原文做转义和截断，避免污染终端。
@@ -576,6 +633,7 @@ class ACPDispatcher(_SessionMapSupport):
                         )
                         tracked_session_ids.add(session_id)
                         self._session_states[session_id] = state
+                        self._session_id_to_session_key[session_id] = session_key
                         logger.warning(
                             "ACP prompt retry with new session_key={} old_session_id={} new_session_id={}",
                             session_key,
@@ -601,6 +659,7 @@ class ACPDispatcher(_SessionMapSupport):
             # 请求结束后清理 session 状态，避免跨请求串流。
             for tracked_session_id in tracked_session_ids:
                 self._session_states.pop(tracked_session_id, None)
+                self._session_active_tool_name.pop(tracked_session_id, None)
 
     async def _handle_stop(self, msg: InboundMessage) -> None:
         """停止当前 session_key 下仍在运行的任务。"""
@@ -612,8 +671,10 @@ class ACPDispatcher(_SessionMapSupport):
             except (asyncio.CancelledError, Exception):
                 pass
         content = f"⏹ Stopped {cancelled} task(s)." if cancelled else "No active task to stop."
-        await self.bus.publish_outbound(
-            OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+        await self._publish_outbound_with_debug(
+            msg=OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content),
+            reason="command_stop",
+            session_key=msg.session_key,
         )
 
     async def _dispatch(self, msg: InboundMessage) -> None:
@@ -625,14 +686,17 @@ class ACPDispatcher(_SessionMapSupport):
                 origin = msg.chat_id if ":" in msg.chat_id else f"cli:{msg.chat_id}"
                 key = origin
 
+            await self._audit_inbound(msg=msg, session_key=key)
             command, arg = self._parse_command(msg.content)
             if command == "/help":
-                await self.bus.publish_outbound(
-                    OutboundMessage(
+                await self._publish_outbound_with_debug(
+                    msg=OutboundMessage(
                         channel=msg.channel,
                         chat_id=msg.chat_id,
                         content=self._HELP_TEXT,
-                    )
+                    ),
+                    reason="command_help",
+                    session_key=key,
                 )
                 return
             if command == "/new":
@@ -641,34 +705,42 @@ class ACPDispatcher(_SessionMapSupport):
                 if old_session_id:
                     self._session_caps.pop(old_session_id, None)
                     self._persist_session_map()
-                await self.bus.publish_outbound(
-                    OutboundMessage(
+                await self._publish_outbound_with_debug(
+                    msg=OutboundMessage(
                         channel=msg.channel, chat_id=msg.chat_id, content="New session started."
-                    )
+                    ),
+                    reason="command_new",
+                    session_key=key,
                 )
                 return
             if command == "/models":
                 session_id = await self._ensure_session(key)
                 content = await self._list_models_command(session_id)
-                await self.bus.publish_outbound(
-                    OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+                await self._publish_outbound_with_debug(
+                    msg=OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content),
+                    reason="command_models",
+                    session_key=key,
                 )
                 return
             if command == "/agents":
                 session_id = await self._ensure_session(key)
                 content = await self._list_agents_command(session_id)
-                await self.bus.publish_outbound(
-                    OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+                await self._publish_outbound_with_debug(
+                    msg=OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content),
+                    reason="command_agents",
+                    session_key=key,
                 )
                 return
             if command == "/set_model":
                 if not arg:
-                    await self.bus.publish_outbound(
-                        OutboundMessage(
+                    await self._publish_outbound_with_debug(
+                        msg=OutboundMessage(
                             channel=msg.channel,
                             chat_id=msg.chat_id,
                             content="Usage: /set_model <model_id>",
-                        )
+                        ),
+                        reason="command_set_model_usage",
+                        session_key=key,
                     )
                     return
                 await self._ensure_connection()
@@ -678,22 +750,26 @@ class ACPDispatcher(_SessionMapSupport):
                 await self._conn.set_session_model(model_id=arg, session_id=session_id)
                 caps = self._session_caps.setdefault(session_id, _SessionCapabilities())
                 caps.current_model = arg
-                await self.bus.publish_outbound(
-                    OutboundMessage(
+                await self._publish_outbound_with_debug(
+                    msg=OutboundMessage(
                         channel=msg.channel,
                         chat_id=msg.chat_id,
                         content=f"Model switched to: {arg}",
-                    )
+                    ),
+                    reason="command_set_model",
+                    session_key=key,
                 )
                 return
             if command == "/set_agent":
                 if not arg:
-                    await self.bus.publish_outbound(
-                        OutboundMessage(
+                    await self._publish_outbound_with_debug(
+                        msg=OutboundMessage(
                             channel=msg.channel,
                             chat_id=msg.chat_id,
                             content="Usage: /set_agent <agent_id>",
-                        )
+                        ),
+                        reason="command_set_agent_usage",
+                        session_key=key,
                     )
                     return
                 await self._ensure_connection()
@@ -703,12 +779,14 @@ class ACPDispatcher(_SessionMapSupport):
                 await self._conn.set_session_mode(mode_id=arg, session_id=session_id)
                 caps = self._session_caps.setdefault(session_id, _SessionCapabilities())
                 caps.current_agent = arg
-                await self.bus.publish_outbound(
-                    OutboundMessage(
+                await self._publish_outbound_with_debug(
+                    msg=OutboundMessage(
                         channel=msg.channel,
                         chat_id=msg.chat_id,
                         content=f"Agent switched to: {arg}",
-                    )
+                    ),
+                    reason="command_set_agent",
+                    session_key=key,
                 )
                 return
 
@@ -734,6 +812,8 @@ class ACPDispatcher(_SessionMapSupport):
             lock = self._process_locks.setdefault(key, asyncio.Lock())
             async with lock:
                 metadata = msg.metadata or {}
+                progress_meta = self._sanitize_outbound_metadata(metadata)
+                progress_meta["_progress"] = True
                 # 中文注释：WS 首帧透传偏好时，仅在“首次创建 ACP session”阶段参与默认选择。
                 preferred_model_raw = metadata.get("_acp_session_model")
                 preferred_agent_raw = metadata.get("_acp_session_agent")
@@ -747,6 +827,29 @@ class ACPDispatcher(_SessionMapSupport):
                     if isinstance(preferred_agent_raw, str) and preferred_agent_raw.strip()
                     else None
                 )
+                send_final = (
+                    True if self.channels_config is None else self.channels_config.send_final
+                )
+                response: str | None = None
+                partial: str | None = None
+                dispatch_error: _ACPDispatchError | None = None
+
+                async def _publish_progress(content: str, tool_hint: bool) -> None:
+                    await self._publish_outbound_with_debug(
+                        msg=OutboundMessage(
+                            channel=msg.channel,
+                            chat_id=msg.chat_id,
+                            content=content,
+                            metadata={**progress_meta, "_tool_hint": tool_hint},
+                        ),
+                        reason="progress_tool_hint" if tool_hint else "progress_text",
+                        session_key=key,
+                    )
+
+                progress_acc = _ProgressAccumulator(
+                    idle_seconds=2.0,
+                    publish=_publish_progress,
+                )
                 try:
                     response = await self.process_direct(
                         msg.content,
@@ -755,51 +858,66 @@ class ACPDispatcher(_SessionMapSupport):
                         chat_id=msg.chat_id,
                         preferred_model=preferred_model,
                         preferred_agent=preferred_agent,
+                        on_progress=progress_acc.on_progress,
                     )
                 except _ACPDispatchError as exc:
-                    # ACP 异常时优先尝试输出 partial，减少用户感知中断。
+                    dispatch_error = exc
                     partial = exc.partial_response.strip()
+                finally:
+                    await progress_acc.close()
+
+                if dispatch_error is not None:
+                    # ACP 异常时优先尝试输出 partial，减少用户感知中断。
                     if partial:
-                        partial_esc = partial.encode("unicode_escape", "ignore").decode("ascii")
-                        if len(partial_esc) > 320:
-                            partial_esc = f"{partial_esc[:320]}..."
-                        logger.warning(
-                            "ACP dispatch fallback using partial response channel={} chat={} session_key={} partial_chars={} partial_esc='{}'",
-                            msg.channel,
-                            msg.chat_id,
-                            key,
-                            len(partial),
-                            partial_esc,
-                        )
-                        await self.bus.publish_outbound(
-                            OutboundMessage(
-                                channel=msg.channel,
-                                chat_id=msg.chat_id,
-                                content=partial,
-                                metadata=self._sanitize_outbound_metadata(msg.metadata),
+                        if send_final:
+                            partial_esc = partial.encode("unicode_escape", "ignore").decode("ascii")
+                            if len(partial_esc) > 320:
+                                partial_esc = f"{partial_esc[:320]}..."
+                            logger.warning(
+                                "ACP dispatch fallback using partial response channel={} chat={} session_key={} partial_chars={} partial_esc='{}'",
+                                msg.channel,
+                                msg.chat_id,
+                                key,
+                                len(partial),
+                                partial_esc,
                             )
-                        )
+                            await self._publish_outbound_with_debug(
+                                msg=OutboundMessage(
+                                    channel=msg.channel,
+                                    chat_id=msg.chat_id,
+                                    content=self._format_final_content(partial),
+                                    metadata=self._sanitize_outbound_metadata(msg.metadata),
+                                ),
+                                reason="final_partial",
+                                session_key=key,
+                            )
                         return
-                    raise
-            await self.bus.publish_outbound(
-                OutboundMessage(
-                    channel=msg.channel,
-                    chat_id=msg.chat_id,
-                    content=response,
-                    metadata=self._sanitize_outbound_metadata(msg.metadata),
-                )
-            )
+                    raise dispatch_error
+
+                if response is not None and send_final:
+                    await self._publish_outbound_with_debug(
+                        msg=OutboundMessage(
+                            channel=msg.channel,
+                            chat_id=msg.chat_id,
+                            content=self._format_final_content(response),
+                            metadata=self._sanitize_outbound_metadata(msg.metadata),
+                        ),
+                        reason="final_response",
+                        session_key=key,
+                    )
         except asyncio.CancelledError:
             raise
         except Exception:
             # 兜底保护：防止异常导致消息链路静默。
             logger.exception("ACP dispatcher failed for {}", msg.session_key)
-            await self.bus.publish_outbound(
-                OutboundMessage(
+            await self._publish_outbound_with_debug(
+                msg=OutboundMessage(
                     channel=msg.channel,
                     chat_id=msg.chat_id,
                     content="Sorry, I encountered an error.",
-                )
+                ),
+                reason="dispatch_exception",
+                session_key=msg.session_key,
             )
 
     async def run(self) -> None:
@@ -841,3 +959,5 @@ class ACPDispatcher(_SessionMapSupport):
         self._conn = None
         self._proc = None
         self._session_map_bootstrapped = False
+        # 中文注释：可观测性资源统一由 mixin 关闭，避免主流程混入文件句柄细节。
+        self._close_observability()
