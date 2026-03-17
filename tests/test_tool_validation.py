@@ -1,3 +1,4 @@
+import sys
 from typing import Any
 
 from nanobot.agent.tools.base import Tool
@@ -382,7 +383,7 @@ async def test_exec_head_tail_truncation() -> None:
     # Generate output that exceeds _MAX_OUTPUT (10_000 chars)
     # Use python to generate output to avoid command line length limits
     result = await tool.execute(
-        command="python -c \"print('A' * 6000 + '\\n' + 'B' * 6000)\""
+        command=f"{sys.executable} -c \"print('A' * 6000 + '\\n' + 'B' * 6000)\""
     )
     assert "chars truncated" in result
     # Head portion should start with As

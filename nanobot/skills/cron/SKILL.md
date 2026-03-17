@@ -25,6 +25,11 @@ Dynamic task (agent executes each time):
 cron(action="add", message="Check HKUDS/nanobot GitHub stars and report", every_seconds=600)
 ```
 
+Dynamic task with fresh context every run:
+```
+cron(action="add", message="Generate a daily summary", cron_expr="0 9 * * *", session_mode="new_each_run")
+```
+
 One-time scheduled task (compute ISO datetime from current time):
 ```
 cron(action="add", message="Remind me about the meeting", at="<ISO datetime>")
@@ -55,3 +60,8 @@ cron(action="remove", job_id="abc123")
 ## Timezone
 
 Use `tz` with `cron_expr` to schedule in a specific IANA timezone. Without `tz`, the server's local timezone is used.
+
+## Session Mode
+
+- `session_mode="continue"` (default): reuse existing cron session context for the same job.
+- `session_mode="new_each_run"`: create a new session context on every execution.

@@ -30,7 +30,8 @@ class ChannelsConfig(Base):
 class AgentDefaults(Base):
     """Default agent configuration."""
 
-    workspace: str = "~/.nanobot/workspace"
+    # 兼容策略：workspace 未显式配置时，回落到 config-root。
+    workspace: str = ""
     model: str = "anthropic/claude-opus-4-5"
     provider: str = (
         "auto"  # Provider name (e.g. "anthropic", "openrouter") or "auto" for auto-detection
@@ -46,7 +47,9 @@ class AgentDefaults(Base):
     @property
     def should_warn_deprecated_memory_window(self) -> bool:
         """Return True when old memoryWindow is present without contextWindowTokens."""
-        return self.memory_window is not None and "context_window_tokens" not in self.model_fields_set
+        return (
+            self.memory_window is not None and "context_window_tokens" not in self.model_fields_set
+        )
 
 
 class AgentsConfig(Base):
@@ -67,7 +70,9 @@ class ProvidersConfig(Base):
     """Configuration for LLM providers."""
 
     custom: ProviderConfig = Field(default_factory=ProviderConfig)  # Any OpenAI-compatible endpoint
-    azure_openai: ProviderConfig = Field(default_factory=ProviderConfig)  # Azure OpenAI (model = deployment name)
+    azure_openai: ProviderConfig = Field(
+        default_factory=ProviderConfig
+    )  # Azure OpenAI (model = deployment name)
     anthropic: ProviderConfig = Field(default_factory=ProviderConfig)
     openai: ProviderConfig = Field(default_factory=ProviderConfig)
     openrouter: ProviderConfig = Field(default_factory=ProviderConfig)
@@ -83,9 +88,15 @@ class ProvidersConfig(Base):
     aihubmix: ProviderConfig = Field(default_factory=ProviderConfig)  # AiHubMix API gateway
     siliconflow: ProviderConfig = Field(default_factory=ProviderConfig)  # SiliconFlow (硅基流动)
     volcengine: ProviderConfig = Field(default_factory=ProviderConfig)  # VolcEngine (火山引擎)
-    volcengine_coding_plan: ProviderConfig = Field(default_factory=ProviderConfig)  # VolcEngine Coding Plan
-    byteplus: ProviderConfig = Field(default_factory=ProviderConfig)  # BytePlus (VolcEngine international)
-    byteplus_coding_plan: ProviderConfig = Field(default_factory=ProviderConfig)  # BytePlus Coding Plan
+    volcengine_coding_plan: ProviderConfig = Field(
+        default_factory=ProviderConfig
+    )  # VolcEngine Coding Plan
+    byteplus: ProviderConfig = Field(
+        default_factory=ProviderConfig
+    )  # BytePlus (VolcEngine international)
+    byteplus_coding_plan: ProviderConfig = Field(
+        default_factory=ProviderConfig
+    )  # BytePlus Coding Plan
     openai_codex: ProviderConfig = Field(default_factory=ProviderConfig)  # OpenAI Codex (OAuth)
     github_copilot: ProviderConfig = Field(default_factory=ProviderConfig)  # Github Copilot (OAuth)
 
@@ -140,7 +151,10 @@ class MCPServerConfig(Base):
     url: str = ""  # HTTP/SSE: endpoint URL
     headers: dict[str, str] = Field(default_factory=dict)  # HTTP/SSE: custom headers
     tool_timeout: int = 30  # seconds before a tool call is cancelled
-    enabled_tools: list[str] = Field(default_factory=lambda: ["*"])  # Only register these tools; accepts raw MCP names or wrapped mcp_<server>_<tool> names; ["*"] = all tools; [] = no tools
+    enabled_tools: list[str] = Field(
+        default_factory=lambda: ["*"]
+    )  # Only register these tools; accepts raw MCP names or wrapped mcp_<server>_<tool> names; ["*"] = all tools; [] = no tools
+
 
 class ToolsConfig(Base):
     """Tools configuration."""
@@ -151,19 +165,74 @@ class ToolsConfig(Base):
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
 
+class PathsConfig(Base):
+    """Instance-level filesystem paths."""
+
+    # 兼容策略：root 为空时，自动使用 config 文件所在目录作为 config-root。
+    root: str = ""
+
+
+class ACPBackendConfig(Base):
+    """ACP backend process settings."""
+
+    command: str = "opencode"
+    args: list[str] = Field(default_factory=lambda: ["acp", "--print-logs", "--log-level", "WARN"])
+    cwd: str | None = None
+    env: dict[str, str] = Field(default_factory=dict)
+    protocol_version: int = 1
+    permissions_policy: Literal["strict", "trusted", "yolo"] = "strict"
+    startup_timeout_seconds: int = 20
+    default_model: str = "xaio/Kimi-K2.5"
+    default_mode: str = "OpenCode-Builder"
+
+
+class DispatchConfig(Base):
+    """Runtime dispatch backend settings."""
+
+    backend: Literal["native", "acp"] = "native"
+    acp: ACPBackendConfig = Field(default_factory=ACPBackendConfig)
+
+
 class Config(BaseSettings):
     """Root configuration for nanobot."""
 
+    paths: PathsConfig = Field(default_factory=PathsConfig)
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    dispatch: DispatchConfig = Field(default_factory=DispatchConfig)
+
+    @property
+    def root_path(self) -> Path:
+        """Resolve config-root path.
+
+        递归缺省链路：
+        - 显式 paths.root
+        - 否则使用 config 文件所在目录（config-root）
+        """
+        root = (self.paths.root or "").strip()
+        if root:
+            return Path(root).expanduser()
+
+        # 避免循环依赖：按需导入 loader。
+        from nanobot.config.loader import get_config_path
+
+        return get_config_path().expanduser().resolve().parent
 
     @property
     def workspace_path(self) -> Path:
-        """Get expanded workspace path."""
-        return Path(self.agents.defaults.workspace).expanduser()
+        """Resolve workspace path with fallback to config-root.
+
+        递归缺省链路：
+        - 显式 workspace
+        - 否则回落到 config-root
+        """
+        workspace = (self.agents.defaults.workspace or "").strip()
+        if workspace:
+            return Path(workspace).expanduser()
+        return self.root_path
 
     def _match_provider(
         self, model: str | None = None

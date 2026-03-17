@@ -1,16 +1,15 @@
-"""Runtime path helpers derived from the active config context."""
+"""Runtime path helpers derived from the active workspace context."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from nanobot.config.loader import get_config_path
+from nanobot.config.loader import load_config
 from nanobot.utils.helpers import ensure_dir
 
 
 def get_data_dir() -> Path:
-    """Return the instance-level runtime data directory."""
-    return ensure_dir(get_config_path().parent)
+    return ensure_dir(load_config().root_path)
 
 
 def get_runtime_subdir(name: str) -> Path:
@@ -36,8 +35,9 @@ def get_logs_dir() -> Path:
 
 def get_workspace_path(workspace: str | None = None) -> Path:
     """Resolve and ensure the agent workspace path."""
-    path = Path(workspace).expanduser() if workspace else Path.home() / ".nanobot" / "workspace"
-    return ensure_dir(path)
+    if workspace:
+        return ensure_dir(Path(workspace).expanduser())
+    return ensure_dir(load_config().workspace_path)
 
 
 def get_cli_history_path() -> Path:
