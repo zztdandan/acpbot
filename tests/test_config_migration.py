@@ -130,3 +130,32 @@ def test_onboard_refresh_backfills_missing_channel_fields(tmp_path, monkeypatch)
     assert result.exit_code == 0
     saved = json.loads(config_path.read_text(encoding="utf-8"))
     assert saved["channels"]["qq"]["msgFormat"] == "plain"
+
+
+def test_load_config_accepts_acp_dispatch_block(tmp_path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "dispatch": {
+                    "backend": "acp",
+                    "acp": {
+                        "command": "opencode",
+                        "args": ["acp", "--log-level", "ERROR"],
+                        "protocolVersion": 1,
+                        "permissionsPolicy": "trusted",
+                    },
+                },
+                "channels": {
+                    "sendProgress": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.dispatch.backend == "acp"
+    assert config.dispatch.acp.command == "opencode"
+    assert config.dispatch.acp.permissions_policy == "trusted"

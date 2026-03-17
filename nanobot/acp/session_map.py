@@ -60,6 +60,11 @@ class _SessionMapSupport:
     def _load_session_map_from_disk(self) -> dict[str, str]:
         """只加载当前 cwd 的映射，避免不同实例互相污染。"""
         if not self._session_map_file.exists():
+            logger.debug(
+                "ACP session map load skipped: file not found path={} cwd={}",
+                self._session_map_file,
+                self._resolved_acp_cwd(),
+            )
             return {}
         try:
             payload = json.loads(self._session_map_file.read_text(encoding="utf-8"))
@@ -79,6 +84,13 @@ class _SessionMapSupport:
             if isinstance(nanobot_side_session_key, str) and isinstance(acp_side_session_id, str):
                 if nanobot_side_session_key and acp_side_session_id:
                     loaded[nanobot_side_session_key] = acp_side_session_id
+        logger.debug(
+            "ACP session map loaded path={} cwd={} loaded={} total_entries={}",
+            self._session_map_file,
+            current_cwd,
+            len(loaded),
+            len(payload.get("mappings", [])) if isinstance(payload, dict) else 0,
+        )
         return loaded
 
     def _persist_session_map(self) -> None:
@@ -118,6 +130,14 @@ class _SessionMapSupport:
         tmp_path = self._session_map_file.with_suffix(".tmp")
         tmp_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
         tmp_path.replace(self._session_map_file)
+        logger.debug(
+            "ACP session map persisted path={} cwd={} active={} preserved_other_cwd={} total_written={}",
+            self._session_map_file,
+            current_cwd,
+            len(self._session_map),
+            len(preserved),
+            len(mappings),
+        )
 
     @staticmethod
     def _extract_session_ids_from_payload(payload: Any) -> set[str]:
@@ -147,15 +167,20 @@ class _SessionMapSupport:
         _walk(payload)
         return ids
 
-    async def _fetch_acp_side_session_ids(self) -> set[str]:
+    async def _fetch_acp_side_session_ids(self) -> tuple[set[str], bool]:
         """通过多种接口名兼容不同 ACP 后端的 session list 能力。"""
         if self._conn is None:
-            return set()
+            return set(), False
 
+        cwd = self._resolved_acp_cwd()
         list_candidates = [
+            ("list_sessions", {"cwd": cwd}),
             ("list_sessions", {}),
+            ("session_list", {"cwd": cwd}),
             ("session_list", {}),
+            ("listSessions", {"cwd": cwd}),
             ("listSessions", {}),
+            ("sessionList", {"cwd": cwd}),
             ("sessionList", {}),
         ]
         for method_name, kwargs in list_candidates:
@@ -167,8 +192,13 @@ class _SessionMapSupport:
             try:
                 payload = await method(**kwargs)
                 ids = self._extract_session_ids_from_payload(payload)
-                if ids:
-                    return ids
+                logger.debug(
+                    "ACP session list succeeded method={} cwd_arg={} ids={}",
+                    method_name,
+                    kwargs.get("cwd"),
+                    len(ids),
+                )
+                return ids, True
             except Exception:
                 logger.debug("ACP list method {} failed", method_name)
 
@@ -178,28 +208,49 @@ class _SessionMapSupport:
         if ext_method is not None:
             for rpc_name in ("session/list", "session.list"):
                 try:
-                    payload = await ext_method(rpc_name, {})
+                    payload = await ext_method(rpc_name, {"cwd": cwd})
                     ids = self._extract_session_ids_from_payload(payload)
-                    if ids:
-                        return ids
+                    logger.debug(
+                        "ACP ext session list succeeded method={} cwd_arg={} ids={}",
+                        rpc_name,
+                        cwd,
+                        len(ids),
+                    )
+                    return ids, True
                 except Exception:
-                    logger.debug("ACP ext session list failed: {}", rpc_name)
+                    try:
+                        payload = await ext_method(rpc_name, {})
+                        ids = self._extract_session_ids_from_payload(payload)
+                        logger.debug(
+                            "ACP ext session list succeeded method={} cwd_arg=<none> ids={}",
+                            rpc_name,
+                            len(ids),
+                        )
+                        return ids, True
+                    except Exception:
+                        logger.debug("ACP ext session list failed: {}", rpc_name)
 
-        return set()
+        logger.debug("ACP session list unavailable for all known methods")
+        return set(), False
 
     async def _acp_session_exists(self, acp_side_session_id: str) -> bool:
         """校验某 ACP session 是否仍存在（先 list，后 load 探测）。"""
         if self._conn is None:
             return False
 
-        listed_ids = await self._fetch_acp_side_session_ids()
-        if listed_ids:
+        listed_ids, listed_authoritative = await self._fetch_acp_side_session_ids()
+        if listed_authoritative:
             return acp_side_session_id in listed_ids
 
+        cwd = self._resolved_acp_cwd()
         load_candidates = [
+            ("load_session", {"cwd": cwd, "session_id": acp_side_session_id}),
             ("load_session", {"session_id": acp_side_session_id}),
+            ("session_load", {"cwd": cwd, "session_id": acp_side_session_id}),
             ("session_load", {"session_id": acp_side_session_id}),
+            ("loadSession", {"cwd": cwd, "sessionId": acp_side_session_id}),
             ("loadSession", {"sessionId": acp_side_session_id}),
+            ("sessionLoad", {"cwd": cwd, "sessionId": acp_side_session_id}),
             ("sessionLoad", {"sessionId": acp_side_session_id}),
         ]
         for method_name, kwargs in load_candidates:
@@ -219,6 +270,8 @@ class _SessionMapSupport:
         )
         if ext_method is not None:
             for rpc_name, params in (
+                ("session/load", {"cwd": cwd, "sessionId": acp_side_session_id}),
+                ("session.load", {"cwd": cwd, "sessionId": acp_side_session_id}),
                 ("session/load", {"sessionId": acp_side_session_id}),
                 ("session.load", {"sessionId": acp_side_session_id}),
             ):
@@ -234,14 +287,34 @@ class _SessionMapSupport:
         """启动对账：删掉 nanobot 有但 ACP 不存在的映射。"""
         if not self._session_map:
             return
-        listed_ids = await self._fetch_acp_side_session_ids()
+        listed_ids, listed_authoritative = await self._fetch_acp_side_session_ids()
+        logger.debug(
+            "ACP reconcile start cwd={} local_mappings={} list_authoritative={} listed_ids={}",
+            self._resolved_acp_cwd(),
+            len(self._session_map),
+            listed_authoritative,
+            len(listed_ids),
+        )
+        if not listed_authoritative:
+            # session/list 在 ACP 里是可选能力；当后端不支持或临时失败时，
+            # 这里拿到空集合并不等价于“远端没有会话”。
+            # 为避免误删本地映射导致会话续接丢失，采用保守策略：本轮不做删除。
+            logger.warning(
+                "ACP session reconciliation skipped: remote session list unavailable, keeping {} local mappings",
+                len(self._session_map),
+            )
+            return
+        if not listed_ids:
+            # 即使 list 调用“成功”，空集合在部分 ACP 后端上仍可能是不可靠结果。
+            # 为避免重启时误清空本地映射，空列表场景同样跳过删除。
+            logger.warning(
+                "ACP session reconciliation skipped: remote session list returned empty while local mappings={}, keep local map",
+                len(self._session_map),
+            )
+            return
         to_delete: list[str] = []
         for nanobot_side_session_key, acp_side_session_id in self._session_map.items():
-            exists = (
-                acp_side_session_id in listed_ids
-                if listed_ids
-                else await self._acp_session_exists(acp_side_session_id)
-            )
+            exists = acp_side_session_id in listed_ids
             if not exists:
                 to_delete.append(nanobot_side_session_key)
         for nanobot_side_session_key in to_delete:
@@ -249,6 +322,11 @@ class _SessionMapSupport:
             if stale_session_id:
                 self._session_caps.pop(stale_session_id, None)
         if to_delete:
+            logger.info(
+                "ACP session reconciliation removed stale mappings count={} remaining={}",
+                len(to_delete),
+                len(self._session_map),
+            )
             self._persist_session_map()
 
     async def _bootstrap_session_map(self) -> None:
