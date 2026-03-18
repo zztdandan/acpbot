@@ -29,11 +29,11 @@
     - `session_update()`：把 ACP session_update 回调转发给 dispatcher。
     - `request_permission()`：权限请求转发到 dispatcher 策略。
 - `progress.py`
-  - `_ProgressAccumulator`：进度聚合器，避免 progress 粒度过碎。
+  - `_ProgressAccumulator`：进度聚合器，避免 progress 粒度过碎，并支持 tool hint 可配置发布策略。
   - 关键功能（函数）：
-    - `on_progress()`：接收文本/tool-hint 并做类型切换聚合。
+    - `on_progress()`：接收文本/tool-hint 并按模式分流（text 死手聚合、tool hint 直发或按 toolCallId 合并）。
     - `flush()` / `close()`：显式 flush + 结束前清理。
-    - `_idle_flush_worker()`：2 秒死手机制自动刷出缓存。
+    - `_text_idle_flush_worker()` / `_tool_idle_flush_worker()`：文本与 toolCallId 维度独立死手刷出。
 - `observability.py`
   - `_ACPObservabilityMixin`：结构化日志与审计落盘能力。
   - 关键功能（函数）：

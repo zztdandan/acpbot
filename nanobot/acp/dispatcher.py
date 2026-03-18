@@ -195,14 +195,19 @@ class ACPDispatcher(_SessionMapSupport, _ACPObservabilityMixin):
         content: str,
         *,
         tool_hint: bool = False,
+        tool_event: dict[str, Any] | None = None,
     ) -> None:
         """安全触发进度回调，兼容不同回调签名。"""
         if not callback or not content:
             return
         try:
-            await callback(content, tool_hint=tool_hint)
+            await callback(content, tool_hint=tool_hint, tool_event=tool_event)
         except TypeError:
-            await callback(content)
+            # 中文注释：兼容旧回调签名：先尝试 (content, tool_hint)，再降级到 (content)。
+            try:
+                await callback(content, tool_hint=tool_hint)
+            except TypeError:
+                await callback(content)
 
     async def _permission_response(self, options: list[Any]) -> Any:
         """按配置策略构造 ACP 权限响应。"""
@@ -246,13 +251,13 @@ class ACPDispatcher(_SessionMapSupport, _ACPObservabilityMixin):
         if isinstance(update, AgentMessageChunk) and isinstance(update.content, TextContentBlock):
             # 文本分片进入去重合并，并按需流式回调给上层。
             state.merge_text(update.content.text)
-            self._log_acp_json(
-                event="acp_session_update_text",
-                payload={
-                    "session_id": session_id,
-                    "text": update.content.text,
-                },
-            )
+            # self._log_acp_json(
+            #     event="acp_session_update_text",
+            #     payload={
+            #         "session_id": session_id,
+            #         "text": update.content.text,
+            #     },
+            # )
             await self._emit_progress(state.on_progress, update.content.text)
             return
 
@@ -260,6 +265,15 @@ class ACPDispatcher(_SessionMapSupport, _ACPObservabilityMixin):
             # tool start/progress 走 tool_hint 通道，便于前端区分展示。
             title = update.title or "tool"
             tool_name = self._extract_tool_name(update)
+            # 中文注释：tool hint 事件保留完整结构，避免只发 title 丢失上下文。
+            tool_event = {
+                "event": "tool_start",
+                "session_id": session_id,
+                "title": title,
+                "status": "pending",
+                "tool_name": tool_name,
+                "tool_call": self._to_jsonable(update),
+            }
             self._session_active_tool_name[session_id] = tool_name
             self._log_acp_json(
                 event="acp_session_update_tool_start",
@@ -279,7 +293,12 @@ class ACPDispatcher(_SessionMapSupport, _ACPObservabilityMixin):
                     "tool_call": update,
                 },
             )
-            await self._emit_progress(state.on_progress, title, tool_hint=True)
+            await self._emit_progress(
+                state.on_progress,
+                title,
+                tool_hint=True,
+                tool_event=tool_event,
+            )
             return
 
         if isinstance(update, ToolCallProgress):
@@ -287,6 +306,14 @@ class ACPDispatcher(_SessionMapSupport, _ACPObservabilityMixin):
             tool_name = self._extract_tool_name(update)
             if tool_name == "unknown_tool":
                 tool_name = self._session_active_tool_name.get(session_id, "unknown_tool")
+            # 中文注释：progress 阶段同样透传完整 tool_call，便于后续按 toolCallId 聚合。
+            tool_event = {
+                "event": "tool_progress",
+                "session_id": session_id,
+                "status": status,
+                "tool_name": tool_name,
+                "tool_call": self._to_jsonable(update),
+            }
             self._log_acp_json(
                 event="acp_session_update_tool_progress",
                 payload={
@@ -306,7 +333,12 @@ class ACPDispatcher(_SessionMapSupport, _ACPObservabilityMixin):
                 },
             )
             if status:
-                await self._emit_progress(state.on_progress, status, tool_hint=True)
+                await self._emit_progress(
+                    state.on_progress,
+                    status,
+                    tool_hint=True,
+                    tool_event=tool_event,
+                )
 
         if isinstance(update, CurrentModeUpdate):
             caps = self._session_caps.get(session_id)
@@ -848,6 +880,26 @@ class ACPDispatcher(_SessionMapSupport, _ACPObservabilityMixin):
 
                 progress_acc = _ProgressAccumulator(
                     idle_seconds=2.0,
+                    tool_hint_publish_mode=(
+                        "immediate"
+                        if self.channels_config is None
+                        else self.channels_config.tool_hint_publish_mode
+                    ),
+                    tool_hint_idle_seconds=(
+                        5.0
+                        if self.channels_config is None
+                        else self.channels_config.tool_hint_merge_idle_seconds
+                    ),
+                    tool_hint_payload_mode=(
+                        "array"
+                        if self.channels_config is None
+                        else self.channels_config.tool_hint_payload_mode
+                    ),
+                    tool_hint_terminal_statuses=(
+                        ("completed", "failed")
+                        if self.channels_config is None
+                        else tuple(self.channels_config.tool_hint_terminal_statuses)
+                    ),
                     publish=_publish_progress,
                 )
                 try:

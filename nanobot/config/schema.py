@@ -26,6 +26,15 @@ class ChannelsConfig(Base):
     send_progress: bool = True  # stream agent's text progress to the channel
     send_tool_hints: bool = False  # stream tool-call hints (e.g. read_file("…"))
     send_final: bool = True  # 是否发送 final 消息（用于避免上游/下游重复展示）
+    # 中文注释：tool hint 发布策略。immediate=默认逐条发布；merge_by_tool_call_id=按 toolCallId 聚合。
+    tool_hint_publish_mode: Literal["immediate", "merge_by_tool_call_id"] = "immediate"
+    # 中文注释：merge_by_tool_call_id 模式下每个 toolCallId 的独立死手秒数。
+    tool_hint_merge_idle_seconds: float = 5.0
+    # 中文注释：tool hint 内容编码形式。
+    # array=直接输出 JSON 数组；status_with_compact=主体保留 session_id/status/tool_call，其他事件放 progress_info。
+    tool_hint_payload_mode: Literal["array", "status_with_compact"] = "array"
+    # 中文注释：status_with_compact 模式下可视为“终态”的状态集合；默认 completed/failed。
+    tool_hint_terminal_statuses: list[str] = Field(default_factory=lambda: ["completed", "failed"])
 
 
 class AgentDefaults(Base):
