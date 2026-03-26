@@ -684,3 +684,29 @@ async def test_handle_session_update_resource_link_writes_outbound_media_file(
     saved = Path(media_paths[0])
     assert saved.exists()
     assert saved.read_text(encoding="utf-8") == "hello from acp"
+
+
+def test_dispatcher_initializes_runtime_state_maps(monkeypatch, tmp_path: Path) -> None:
+    config_root = tmp_path / ".nanobot" / "config"
+    monkeypatch.setattr("nanobot.acp.dispatcher.get_data_dir", lambda: config_root)
+
+    dispatcher = ACPDispatcher(
+        bus=MessageBus(),
+        workspace=tmp_path / "workspace-init-state",
+        acp_config=ACPBackendConfig(),
+    )
+
+    assert dispatcher._running is False
+    assert dispatcher._conn is None
+    assert dispatcher._proc is None
+    assert dispatcher._session_map == {}
+    assert dispatcher._session_locks == {}
+    assert dispatcher._process_locks == {}
+    assert dispatcher._session_states == {}
+    assert dispatcher._session_caps == {}
+    assert dispatcher._active_tasks == {}
+    assert dispatcher._session_id_to_session_key == {}
+    assert dispatcher._session_active_tool_name == {}
+    assert dispatcher._session_result_media == {}
+    assert dispatcher._session_pending_media == {}
+    assert dispatcher._session_map_file == config_root / "acp-session-map.json"

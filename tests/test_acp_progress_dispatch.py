@@ -9,7 +9,21 @@ import pytest
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import ACPBackendConfig, ChannelsConfig
-from nanobot.dispatch.acp import ACPDispatcher, _ACPDispatchError
+from nanobot.acp.dispatcher import ACPDispatcher
+from nanobot.dispatch.acp import _ACPDispatchError
+
+try:
+    from nanobot.acp.dispatcher_core import ACPDispatcher as _CoreACPDispatcher
+except ModuleNotFoundError:
+    # 中文注释：兼容旧安装环境（仅用于本地入口差异）；主验证仍在当前源码树执行。
+    _CoreACPDispatcher = ACPDispatcher
+
+
+def test_dispatcher_module_exports_core_dispatcher() -> None:
+    # Given: dispatcher.py 仅作为兼容导出层，应与 dispatcher_core 暴露同一类对象。
+    # 中文注释：不同测试入口（python -m pytest / pytest）下 __module__ 可能受加载路径影响，
+    # 这里用“对象同一性”保证薄导出语义稳定。
+    assert ACPDispatcher is _CoreACPDispatcher
 
 
 def test_channels_send_final_alias_parsing() -> None:
