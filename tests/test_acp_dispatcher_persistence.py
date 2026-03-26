@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from nanobot.acp.dispatcher import ACPDispatcher
+from nanobot.acp.state import _StreamState
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import ACPBackendConfig
@@ -18,6 +19,7 @@ class _FakeConn:
         self._existing_session_ids = set(existing_session_ids or set())
         self._seq = 0
         self.prompt_session_ids: list[str] = []
+        self.prompt_payloads: list[list[object]] = []
         self.model_calls: list[tuple[str, str]] = []
         self.mode_calls: list[tuple[str, str]] = []
 
@@ -34,8 +36,8 @@ class _FakeConn:
         }
 
     async def prompt(self, prompt: list[object], session_id: str):
-        del prompt
         self.prompt_session_ids.append(session_id)
+        self.prompt_payloads.append(prompt)
 
     async def set_session_model(self, model_id: str, session_id: str) -> None:
         self.model_calls.append((session_id, model_id))
@@ -447,7 +449,7 @@ async def test_ws_metadata_preferences_override_default_model_and_agent(
     )
 
     out = await bus.consume_outbound()
-    assert out.content == ""
+    assert out.content == "<final></final>"
     # 中文注释：首帧偏好优先于 default；session 创建后会调用 ACP set_session_*。
     assert len(conn.model_calls) == 1
     assert len(conn.mode_calls) == 1
@@ -599,3 +601,86 @@ async def test_outbound_metadata_strips_ws_preference_control_keys(
     )
     out = await bus.consume_outbound()
     assert out.metadata == {"client_trace_id": "trace-1"}
+
+
+@pytest.mark.asyncio
+async def test_dispatch_includes_text_media_as_resource_block_in_prompt(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config_root = tmp_path / ".nanobot" / "config"
+    monkeypatch.setattr("nanobot.acp.dispatcher.get_data_dir", lambda: config_root)
+
+    media_file = tmp_path / "sample.md"
+    media_file.write_text("# sample\n" + ("A" * (100 * 1024)), encoding="utf-8")
+
+    bus = MessageBus()
+    dispatcher = ACPDispatcher(
+        bus=bus,
+        workspace=tmp_path / "workspace-media-in",
+        acp_config=ACPBackendConfig(),
+    )
+    conn = _FakeConn()
+    dispatcher._conn = conn
+    dispatcher._convert_mcp_servers = lambda: []
+
+    async def _noop() -> None:
+        return None
+
+    dispatcher._ensure_connection = _noop
+
+    await dispatcher._dispatch(
+        InboundMessage(
+            channel="websocket",
+            sender_id="u",
+            chat_id="chat-media-in",
+            content="check file",
+            media=[str(media_file)],
+        )
+    )
+
+    _ = await bus.consume_outbound()
+    assert conn.prompt_payloads
+    prompt_blocks = conn.prompt_payloads[0]
+    assert len(prompt_blocks) >= 2
+    assert getattr(prompt_blocks[0], "type", None) == "text"
+    assert getattr(prompt_blocks[1], "type", None) == "resource"
+
+
+@pytest.mark.asyncio
+async def test_handle_session_update_resource_link_writes_outbound_media_file(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config_root = tmp_path / ".nanobot" / "config"
+    monkeypatch.setattr("nanobot.acp.dispatcher.get_data_dir", lambda: config_root)
+
+    source = tmp_path / "agent-output.txt"
+    source.write_text("hello from acp", encoding="utf-8")
+
+    dispatcher = ACPDispatcher(
+        bus=MessageBus(),
+        workspace=tmp_path / "workspace-media-out",
+        acp_config=ACPBackendConfig(),
+    )
+    state_session = "session-1"
+    dispatcher._session_states[state_session] = _StreamState()
+
+    from acp.helpers import resource_link_block, update_agent_message
+
+    update = update_agent_message(
+        resource_link_block(
+            name=source.name,
+            uri=source.resolve().as_uri(),
+            mime_type="text/plain",
+            size=source.stat().st_size,
+        )
+    )
+
+    await dispatcher._handle_session_update(state_session, update)
+
+    media_paths = dispatcher._session_states[state_session].final_media()
+    assert len(media_paths) == 1
+    saved = Path(media_paths[0])
+    assert saved.exists()
+    assert saved.read_text(encoding="utf-8") == "hello from acp"

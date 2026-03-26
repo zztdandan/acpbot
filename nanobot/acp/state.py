@@ -14,6 +14,8 @@ class _StreamState:
     def __init__(self, on_progress: Callable[..., Awaitable[None]] | None = None):
         # text 保存当前会话的累积文本；on_progress 用于转发进度回调。
         self.text = ""
+        # 中文注释：media_paths 聚合 ACP 回传附件的本地落盘路径，供 final 消息统一透传到 channel。
+        self.media_paths: list[str] = []
         self.on_progress = on_progress
 
     def merge_text(self, chunk: str) -> None:
@@ -33,6 +35,15 @@ class _StreamState:
     def final(self) -> str:
         """返回清理后的最终文本。"""
         return self.text.strip()
+
+    def add_media(self, path: str) -> None:
+        """记录附件路径（去重），保持原始顺序。"""
+        if path and path not in self.media_paths:
+            self.media_paths.append(path)
+
+    def final_media(self) -> list[str]:
+        """返回附件路径副本，避免外部直接修改内部状态。"""
+        return list(self.media_paths)
 
 
 class _ACPDispatchError(RuntimeError):

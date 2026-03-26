@@ -1,6 +1,8 @@
 import asyncio
+import base64
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytest
 
@@ -157,3 +159,115 @@ async def test_outbound_only_fanout_to_subscribed_chat() -> None:
 
     await channel._cleanup_connection(conn_a, close_code=None, reason="done")
     await channel._cleanup_connection(conn_b, close_code=None, reason="done")
+
+
+@pytest.mark.asyncio
+async def test_send_frame_accepts_100kb_blob_media_and_publishes_local_path(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        "nanobot.channels.websocket.get_media_dir",
+        lambda channel=None: (tmp_path / "media-root" / (channel or "root")),
+    )
+    channel = _make_channel(allow_from=["*"], tokens=["ok-token"])
+    payload = b"x" * (100 * 1024)
+    conn = _FakeConnection(
+        incoming=[
+            json.dumps({"type": "auth", "token": "ok-token", "principalId": "u-blob"}),
+            json.dumps(
+                {
+                    "type": "send",
+                    "chatId": "chat-media",
+                    "content": "text only",
+                    "media": [
+                        {
+                            "mode": "blob",
+                            "filename": "sample.txt",
+                            "mimeType": "text/plain",
+                            "data": base64.b64encode(payload).decode("ascii"),
+                        }
+                    ],
+                }
+            ),
+            RuntimeError("client done"),
+        ]
+    )
+
+    await channel._on_connection(conn)
+
+    msg = await asyncio.wait_for(channel.bus.consume_inbound(), timeout=1)
+    assert msg.content == "text only"
+    assert len(msg.media) == 1
+    saved = Path(msg.media[0])
+    assert saved.exists()
+    assert saved.stat().st_size == 100 * 1024
+    assert saved.read_bytes() == payload
+
+
+@pytest.mark.asyncio
+async def test_send_frame_rejects_blob_media_over_2mb_limit() -> None:
+    channel = _make_channel(allow_from=["*"], tokens=["ok-token"])
+    payload = b"x" * ((2 * 1024 * 1024) + 1)
+    conn = _FakeConnection(
+        incoming=[
+            json.dumps({"type": "auth", "token": "ok-token", "principalId": "u-limit"}),
+            json.dumps(
+                {
+                    "type": "send",
+                    "chatId": "chat-limit",
+                    "content": "too big",
+                    "requestId": "req-1",
+                    "media": [
+                        {
+                            "mode": "blob",
+                            "filename": "oversize.bin",
+                            "data": base64.b64encode(payload).decode("ascii"),
+                        }
+                    ],
+                }
+            ),
+            RuntimeError("client done"),
+        ]
+    )
+
+    await channel._on_connection(conn)
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(channel.bus.consume_inbound(), timeout=0.2)
+
+    error_frames = [json.loads(item) for item in conn.sent if isinstance(item, str)]
+    assert any(frame.get("code") == "BAD_MEDIA" for frame in error_frames)
+
+
+@pytest.mark.asyncio
+async def test_outbound_media_default_blob_mode_encodes_100kb_file(tmp_path: Path) -> None:
+    channel = _make_channel(allow_from=["*"], tokens=["ok-token"])
+    conn = _FakeConnection(incoming=[])
+    await channel._register_connection(conn, "u-blob-out")
+    channel._chat_subscribers.setdefault("chat-out", set()).add(conn)
+
+    path = tmp_path / "outbound.txt"
+    path.write_bytes(b"y" * (100 * 1024))
+
+    await channel.send(
+        OutboundMessage(
+            channel="websocket",
+            chat_id="chat-out",
+            content="with file",
+            media=[str(path)],
+        )
+    )
+    await asyncio.sleep(0)
+
+    assert conn.sent
+    payload = json.loads(conn.sent[0])
+    assert payload["chatId"] == "chat-out"
+    assert payload["type"] == "final"
+    assert isinstance(payload.get("media"), list)
+    assert payload["media"][0]["mode"] == "blob"
+    assert payload["media"][0]["size"] == 100 * 1024
+    decoded = base64.b64decode(payload["media"][0]["data"], validate=True)
+    assert len(decoded) == 100 * 1024
+
+    await channel._cleanup_connection(conn, close_code=None, reason="done")

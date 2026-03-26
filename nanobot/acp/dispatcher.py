@@ -17,6 +17,7 @@ from typing import Any, Awaitable, Callable, cast
 from loguru import logger
 
 from nanobot.acp.client import _NanobotACPClient
+from nanobot.acp.media_codec import _ACPFileTransportMixin
 from nanobot.acp.observability import _ACPObservabilityMixin
 from nanobot.acp.progress import _ProgressAccumulator
 from nanobot.acp.session_map import _SessionMapSupport
@@ -27,7 +28,7 @@ from nanobot.config.paths import get_data_dir
 from nanobot.config.schema import ACPBackendConfig, ChannelsConfig, MCPServerConfig
 
 
-class ACPDispatcher(_SessionMapSupport, _ACPObservabilityMixin):
+class ACPDispatcher(_ACPFileTransportMixin, _SessionMapSupport, _ACPObservabilityMixin):
     """ACP backend 的运行时分发器。"""
 
     # ACP 模式下可用的 slash 命令帮助文本。
@@ -81,6 +82,10 @@ class ACPDispatcher(_SessionMapSupport, _ACPObservabilityMixin):
         self._session_active_tool_name: dict[str, str] = {}
         # 中文注释：审计文件状态由可观测性 mixin 统一维护，避免主调度器继续膨胀。
         self._init_observability_state()
+        # 中文注释：每个 session_key 最近一次 process_direct 的附件落盘结果，供 _dispatch 组装 final。
+        self._session_result_media: dict[str, list[str]] = {}
+        # 中文注释：_dispatch 预存的 inbound media，process_direct 取出后立即消费，避免跨轮串附件。
+        self._session_pending_media: dict[str, list[str]] = {}
 
     @staticmethod
     def _pick(obj: Any, *names: str) -> Any:
@@ -99,6 +104,43 @@ class ACPDispatcher(_SessionMapSupport, _ACPObservabilityMixin):
     def _acp_text_block(content: str) -> Any:
         """延迟导入 ACP text_block，避免模块导入期强依赖 ACP。"""
         return import_module("acp").text_block(content)
+
+    @staticmethod
+    def _acp_image_block(data: str, mime_type: str, *, uri: str | None = None) -> Any:
+        """延迟导入 ACP image_block。"""
+        return import_module("acp").image_block(data=data, mime_type=mime_type, uri=uri)
+
+    @staticmethod
+    def _acp_resource_link_block(
+        name: str,
+        uri: str,
+        *,
+        mime_type: str | None,
+        size: int | None,
+    ) -> Any:
+        """延迟导入 ACP resource_link_block。"""
+        return import_module("acp").resource_link_block(
+            name=name,
+            uri=uri,
+            mime_type=mime_type,
+            size=size,
+            title=name,
+        )
+
+    @staticmethod
+    def _acp_embedded_text_resource(uri: str, text: str, *, mime_type: str | None) -> Any:
+        """延迟导入 ACP embedded_text_resource。"""
+        return import_module("acp").embedded_text_resource(uri=uri, text=text, mime_type=mime_type)
+
+    @staticmethod
+    def _acp_embedded_blob_resource(uri: str, blob: str, *, mime_type: str | None) -> Any:
+        """延迟导入 ACP embedded_blob_resource。"""
+        return import_module("acp").embedded_blob_resource(uri=uri, blob=blob, mime_type=mime_type)
+
+    @staticmethod
+    def _acp_resource_block(resource: Any) -> Any:
+        """延迟导入 ACP resource_block。"""
+        return import_module("acp").resource_block(resource=resource)
 
     @staticmethod
     def _is_invalid_params_request_error(exc: Exception) -> bool:
@@ -238,6 +280,9 @@ class ACPDispatcher(_SessionMapSupport, _ACPObservabilityMixin):
         from acp.schema import (
             AgentMessageChunk,
             CurrentModeUpdate,
+            EmbeddedResourceContentBlock,
+            ImageContentBlock,
+            ResourceContentBlock,
             TextContentBlock,
             ToolCallProgress,
             ToolCallStart,
@@ -259,6 +304,16 @@ class ACPDispatcher(_SessionMapSupport, _ACPObservabilityMixin):
             #     },
             # )
             await self._emit_progress(state.on_progress, update.content.text)
+            return
+
+        if isinstance(update, AgentMessageChunk) and isinstance(
+            update.content,
+            (ImageContentBlock, ResourceContentBlock, EmbeddedResourceContentBlock),
+        ):
+            # 中文注释：ACP 非文本块统一在 dispatcher 落盘，最终透传为 OutboundMessage.media filepath。
+            media_path = self._extract_agent_media_path(session_id, update.content)
+            if media_path:
+                state.add_media(media_path)
             return
 
         if isinstance(update, ToolCallStart):
@@ -344,6 +399,7 @@ class ACPDispatcher(_SessionMapSupport, _ACPObservabilityMixin):
             caps = self._session_caps.get(session_id)
             if caps is not None:
                 caps.current_agent = update.current_mode_id
+        return
 
     async def _ensure_connection(self) -> None:
         """确保 ACP 连接可用；首次调用时完成进程拉起与 initialize。"""
@@ -640,11 +696,12 @@ class ACPDispatcher(_SessionMapSupport, _ACPObservabilityMixin):
                 len(content),
                 content_esc,
             )
+            media_paths = self._session_pending_media.pop(session_key, [])
 
             for attempt in range(2):
                 try:
                     await self._conn.prompt(
-                        prompt=[self._acp_text_block(content)],
+                        prompt=self._build_inbound_prompt_blocks(content, media_paths),
                         session_id=session_id,
                     )
                     break
@@ -688,6 +745,8 @@ class ACPDispatcher(_SessionMapSupport, _ACPObservabilityMixin):
                     raise _ACPDispatchError(partial_response=state.final()) from exc
             return state.final()
         finally:
+            self._session_pending_media.pop(session_key, None)
+            self._session_result_media[session_key] = state.final_media()
             # 请求结束后清理 session 状态，避免跨请求串流。
             for tracked_session_id in tracked_session_ids:
                 self._session_states.pop(tracked_session_id, None)
@@ -865,6 +924,7 @@ class ACPDispatcher(_SessionMapSupport, _ACPObservabilityMixin):
                 response: str | None = None
                 partial: str | None = None
                 dispatch_error: _ACPDispatchError | None = None
+                response_media: list[str] = []
 
                 async def _publish_progress(content: str, tool_hint: bool) -> None:
                     await self._publish_outbound_with_debug(
@@ -903,6 +963,8 @@ class ACPDispatcher(_SessionMapSupport, _ACPObservabilityMixin):
                     publish=_publish_progress,
                 )
                 try:
+                    # 中文注释：把当前轮附件挂到 session_key，供 process_direct 在真正发 prompt 时转换 ACP blocks。
+                    self._session_pending_media[key] = list(msg.media or [])
                     response = await self.process_direct(
                         msg.content,
                         session_key=key,
@@ -916,6 +978,8 @@ class ACPDispatcher(_SessionMapSupport, _ACPObservabilityMixin):
                     dispatch_error = exc
                     partial = exc.partial_response.strip()
                 finally:
+                    self._session_pending_media.pop(key, None)
+                    response_media = self._session_result_media.pop(key, [])
                     await progress_acc.close()
 
                 if dispatch_error is not None:
@@ -938,6 +1002,7 @@ class ACPDispatcher(_SessionMapSupport, _ACPObservabilityMixin):
                                     channel=msg.channel,
                                     chat_id=msg.chat_id,
                                     content=self._format_final_content(partial),
+                                    media=response_media,
                                     metadata=self._sanitize_outbound_metadata(msg.metadata),
                                 ),
                                 reason="final_partial",
@@ -952,6 +1017,7 @@ class ACPDispatcher(_SessionMapSupport, _ACPObservabilityMixin):
                             channel=msg.channel,
                             chat_id=msg.chat_id,
                             content=self._format_final_content(response),
+                            media=response_media,
                             metadata=self._sanitize_outbound_metadata(msg.metadata),
                         ),
                         reason="final_response",

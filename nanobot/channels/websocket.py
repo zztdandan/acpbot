@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
+import mimetypes
+import re
 import ssl
+import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from loguru import logger
 from pydantic import Field
@@ -13,6 +19,7 @@ from pydantic import Field
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
+from nanobot.config.paths import get_media_dir
 from nanobot.config.schema import Base
 
 
@@ -39,6 +46,8 @@ class WebSocketLimitsConfig(Base):
     auth_timeout_seconds: int = 10
     idle_timeout_seconds: int = 30 * 60
     outbound_queue_size: int = 200
+    # 中文注释：按需求限制 WS 文件传输大小，默认单文件 2MB。
+    max_media_bytes: int = 2 * 1024 * 1024
 
 
 class WebSocketConfig(Base):
@@ -47,6 +56,8 @@ class WebSocketConfig(Base):
     port: int = 18790
     path: str = "/ws"
     allow_from: list[str] = Field(default_factory=list)
+    # 中文注释：出站文件默认发 blob，跨主机/跨进程场景无需共享磁盘。
+    outbound_media_mode: Literal["blob", "filepath"] = "blob"
     auth: WebSocketAuthConfig = Field(default_factory=WebSocketAuthConfig)
     tls: WebSocketTLSConfig = Field(default_factory=WebSocketTLSConfig)
     limits: WebSocketLimitsConfig = Field(default_factory=WebSocketLimitsConfig)
@@ -142,11 +153,143 @@ class WebSocketChannel(BaseChannel):
             "content": msg.content,
             "metadata": msg.metadata,
         }
+        if msg.media:
+            # 中文注释：WS 出站附件支持 filepath/blob 双模式；默认 blob 便于远端直接消费。
+            payload["media"] = await self._build_outbound_media_payload(msg.media)
 
         for conn in recipients:
             await self._enqueue_frame(
                 conn, _OutboundFrame(payload=payload, is_progress=is_progress)
             )
+
+    @staticmethod
+    def _sanitize_filename(name: str) -> str:
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", (name or "").strip())
+        return safe or "ws-file.bin"
+
+    def _media_storage_dir(self) -> Path:
+        # 中文注释：WS 入站 blob 文件统一落盘到独立子目录，便于后续审计与清理。
+        target = get_media_dir("websocket") / "inbound"
+        target.mkdir(parents=True, exist_ok=True)
+        return target
+
+    def _persist_inbound_blob(self, *, data: bytes, filename: str) -> str:
+        safe_name = self._sanitize_filename(filename)
+        short_hash = f"{(hash(data) & 0xFFFFFFFF):08x}"
+        output = self._media_storage_dir() / f"{int(time.time() * 1000)}-{short_hash}-{safe_name}"
+        output.write_bytes(data)
+        return str(output)
+
+    async def _build_outbound_media_payload(self, media_paths: list[str]) -> list[dict[str, Any]]:
+        mode = str(self.config.outbound_media_mode or "blob").strip().lower()
+        max_bytes = max(int(self.config.limits.max_media_bytes), 0)
+        payloads: list[dict[str, Any]] = []
+        for raw_path in media_paths:
+            path = Path(str(raw_path)).expanduser()
+            if not path.is_file():
+                logger.warning("websocket outbound media skipped (not file): {}", raw_path)
+                continue
+            try:
+                size = path.stat().st_size
+            except OSError as e:
+                logger.warning("websocket outbound media stat failed path={} err={}", path, e)
+                continue
+            if max_bytes > 0 and size > max_bytes:
+                logger.warning(
+                    "websocket outbound media skipped (too large) path={} size={} limit={}",
+                    path,
+                    size,
+                    max_bytes,
+                )
+                continue
+            if mode == "filepath":
+                payloads.append(
+                    {
+                        "mode": "filepath",
+                        "path": str(path.resolve()),
+                        "filename": path.name,
+                        "size": size,
+                    }
+                )
+                continue
+
+            try:
+                raw = path.read_bytes()
+            except OSError as e:
+                logger.warning("websocket outbound media read failed path={} err={}", path, e)
+                continue
+            mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            payloads.append(
+                {
+                    "mode": "blob",
+                    "filename": path.name,
+                    "mimeType": mime_type,
+                    "size": size,
+                    "data": base64.b64encode(raw).decode("ascii"),
+                }
+            )
+        return payloads
+
+    async def _normalize_inbound_media(self, media_payload: Any) -> list[str]:
+        """把 WS 帧里的文件描述统一为本地 filepath 列表。"""
+        if media_payload is None:
+            return []
+        if not isinstance(media_payload, list):
+            raise ValueError("media must be a list")
+
+        resolved: list[str] = []
+        max_bytes = max(int(self.config.limits.max_media_bytes), 0)
+        for item in media_payload:
+            if isinstance(item, str):
+                if item.startswith("http://") or item.startswith("https://"):
+                    raise ValueError("remote URL media is not allowed")
+                raw_path = item
+                if item.startswith("file://"):
+                    raw_path = unquote(urlsplit(item).path)
+                path = Path(raw_path).expanduser()
+                if not path.is_file():
+                    raise ValueError(f"media file not found: {item}")
+                try:
+                    size = path.stat().st_size
+                except OSError as e:
+                    raise ValueError(f"cannot read media file stat: {item}") from e
+                if max_bytes > 0 and size > max_bytes:
+                    raise ValueError(f"media file too large: {item}")
+                resolved.append(str(path.resolve()))
+                continue
+
+            if not isinstance(item, dict):
+                raise ValueError("media item must be string path or object")
+            mode = str(item.get("mode") or "").strip().lower()
+            if mode in {"path", "filepath"}:
+                path_value = str(item.get("path") or "")
+                if not path_value:
+                    raise ValueError("path media requires path")
+                path = Path(path_value).expanduser()
+                if not path.is_file():
+                    raise ValueError(f"media file not found: {path_value}")
+                try:
+                    size = path.stat().st_size
+                except OSError as e:
+                    raise ValueError(f"cannot read media file stat: {path_value}") from e
+                if max_bytes > 0 and size > max_bytes:
+                    raise ValueError(f"media file too large: {path_value}")
+                resolved.append(str(path.resolve()))
+                continue
+
+            # 中文注释：默认将 dict 当作 blob/base64 处理，兼容 mode 缺失但包含 data 的请求。
+            b64_data = str(item.get("data") or "")
+            if not b64_data:
+                raise ValueError("blob media requires data")
+            try:
+                raw = base64.b64decode(b64_data, validate=True)
+            except (ValueError, binascii.Error) as e:
+                raise ValueError("invalid base64 media data") from e
+            if max_bytes > 0 and len(raw) > max_bytes:
+                raise ValueError("media blob too large")
+            filename = self._sanitize_filename(str(item.get("filename") or "blob.bin"))
+            resolved.append(self._persist_inbound_blob(data=raw, filename=filename))
+        return resolved
 
     def _build_ssl_context(self) -> ssl.SSLContext | None:
         if not self.config.tls.enabled:
@@ -351,6 +494,19 @@ class WebSocketChannel(BaseChannel):
             metadata_raw = data.get("metadata")
             metadata: dict[str, Any] = metadata_raw if isinstance(metadata_raw, dict) else {}
             metadata["_websocket_request_id"] = data.get("requestId")
+            try:
+                media = await self._normalize_inbound_media(data.get("media"))
+            except ValueError as e:
+                await self._send_to_connection(
+                    connection,
+                    {
+                        "type": "error",
+                        "code": "BAD_MEDIA",
+                        "message": str(e),
+                        "requestId": data.get("requestId"),
+                    },
+                )
+                return
             prefs = self._connection_acp_preferences.get(connection, {})
             if prefs.get("model"):
                 metadata["_acp_session_model"] = prefs["model"]
@@ -361,6 +517,7 @@ class WebSocketChannel(BaseChannel):
                 sender_id=self._connection_principals.get(connection, "unknown"),
                 chat_id=chat_id,
                 content=content,
+                media=media,
                 metadata=metadata,
                 # 中文注释：sessionKey 可选覆盖默认 websocket:<chat_id>，用于同 chat 多线程并行对话。
                 session_key=str(session_key) if session_key else None,
