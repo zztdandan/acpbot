@@ -192,7 +192,9 @@ async def _ensure_session(
     """确保 session_key 对应 ACP session 存在并可复用。"""
     session_id = runtime._session_map.get(session_key)
     if session_id:
-        if await _activate_existing_session(runtime, session_key=session_key, session_id=session_id):
+        if await _activate_existing_session(
+            runtime, session_key=session_key, session_id=session_id
+        ):
             return session_id
         runtime._session_map.pop(session_key, None)
         runtime._session_caps.pop(session_id, None)
@@ -319,6 +321,31 @@ async def _process_direct_impl(
                 )
                 break
             except Exception as exc:
+                # 中文注释：部分 ACP 后端在单轮完成后会主动断开连接，
+                # 下一轮 prompt 直接复用旧连接会报 "Connection closed"。
+                # 这里做一次“重建连接 + 重建会话”的自愈重试。
+                if attempt == 0 and _is_connection_closed_error(exc):
+                    runtime._conn = None
+                    runtime._proc = None
+                    runtime._conn_cm = None
+                    runtime._session_map_bootstrapped = False
+                    runtime._session_states.pop(session_id, None)
+                    session_id = await _ensure_session(
+                        runtime,
+                        session_key,
+                        preferred_model=preferred_model,
+                        preferred_agent=preferred_agent,
+                    )
+                    tracked_session_ids.add(session_id)
+                    runtime._session_states[session_id] = state
+                    runtime._session_id_to_session_key[session_id] = session_key
+                    logger.warning(
+                        "ACP prompt retry after connection closed session_key={} new_session_id={}",
+                        session_key,
+                        session_id,
+                    )
+                    continue
+
                 # 中文注释：历史 session 映射在某些后端重启场景会失效，
                 # 这里对 invalid params 做一次“删映射+重建会话”的自愈重试。
                 if attempt == 0 and _is_invalid_params_request_error(exc):
@@ -365,3 +392,15 @@ async def _process_direct_impl(
         for tracked_session_id in tracked_session_ids:
             runtime._session_states.pop(tracked_session_id, None)
             runtime._session_active_tool_name.pop(tracked_session_id, None)
+
+
+def _is_connection_closed_error(exc: Exception) -> bool:
+    """Return True when the exception indicates ACP transport closed.
+
+    中文注释：优先按异常类型名判断（ConnectionError），并保留消息兜底，
+    兼容不同依赖版本对错误类型的差异封装。
+    """
+
+    if type(exc).__name__ == "ConnectionError":
+        return True
+    return "connection closed" in str(exc).lower()
