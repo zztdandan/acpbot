@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import shlex
+import shutil
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable
 from uuid import uuid4
 
@@ -15,6 +18,10 @@ from nanobot.acp.dispatcher import ACPDispatcher
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import ACPBackendConfig
+
+
+FILE_TRANSPORT_DIRNAME = "file_transport"
+PLUGIN_FILENAME = "acp-send-file.ts"
 
 
 def e2e_enabled() -> bool:
@@ -47,7 +54,11 @@ def build_session_key() -> str:
     return f"acp-e2e:{uuid4().hex[:12]}"
 
 
-def build_acp_config() -> ACPBackendConfig:
+def build_acp_config(
+    *,
+    permission_policy: str | None = None,
+    honor_env_policy: bool = True,
+) -> ACPBackendConfig:
     """Create ACP backend config from environment overrides.
 
     中文注释：这里把 command/args/model/mode 等抽成环境变量，
@@ -60,23 +71,88 @@ def build_acp_config() -> ACPBackendConfig:
 
     cfg = ACPBackendConfig(command=command, args=args)
 
-    model = os.getenv("NANOBOT_ACP_E2E_MODEL", "").strip()
+    model = os.getenv("NANOBOT_ACP_E2E_MODEL", "RCode_OpenAI/gpt-5.4").strip()
     if model:
         cfg.default_model = model
 
-    mode = os.getenv("NANOBOT_ACP_E2E_MODE", "").strip()
+    mode = os.getenv("NANOBOT_ACP_E2E_MODE", "build").strip()
     if mode:
+        # 中文注释：real-chain FT 需要稳定可调用工具的 agent mode，默认钉住 build。
         cfg.default_mode = mode
 
-    policy = os.getenv("NANOBOT_ACP_E2E_PERMISSION_POLICY", "").strip()
-    if policy in {"strict", "trusted", "yolo"}:
-        cfg.permissions_policy = policy  # type: ignore[assignment]
+    if permission_policy in {"strict", "trusted", "yolo"}:
+        # 中文注释：FT default/trusted harness 需要固定策略，避免环境变量悄悄污染测试语义。
+        cfg.permissions_policy = permission_policy  # type: ignore[assignment]
+    elif honor_env_policy:
+        policy = os.getenv("NANOBOT_ACP_E2E_PERMISSION_POLICY", "").strip()
+        if policy in {"strict", "trusted", "yolo"}:
+            cfg.permissions_policy = policy  # type: ignore[assignment]
 
     timeout_raw = os.getenv("NANOBOT_ACP_E2E_STARTUP_TIMEOUT", "").strip()
     if timeout_raw.isdigit():
         cfg.startup_timeout_seconds = max(5, int(timeout_raw))
 
     return cfg
+
+
+def file_transport_fixture_source_dir() -> Path:
+    """Return repository source directory for canonical FT sample files."""
+
+    return Path(__file__).resolve().parent / "tranport_file_example"
+
+
+def plugin_fixture_source_path() -> Path:
+    """Return repository source path for canonical ACP send-file plugin fixture."""
+
+    return Path(__file__).resolve().parent / "plugins" / PLUGIN_FILENAME
+
+
+def stage_file_transport_workspace(workspace: Path) -> tuple[Path, Path]:
+    """Copy FT sample files and plugin fixture into the ACP workspace."""
+
+    fixture_dir = workspace / "fixtures" / FILE_TRANSPORT_DIRNAME
+    plugin_path = workspace / ".opencode" / "plugin" / PLUGIN_FILENAME
+    if fixture_dir.exists():
+        shutil.rmtree(fixture_dir)
+    shutil.copytree(file_transport_fixture_source_dir(), fixture_dir)
+    plugin_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(plugin_fixture_source_path(), plugin_path)
+    return fixture_dir, plugin_path
+
+
+def staged_fixture_path(workspace: Path, filename: str) -> Path:
+    """Build one staged FT sample path under the ACP workspace."""
+
+    return workspace / "fixtures" / FILE_TRANSPORT_DIRNAME / filename
+
+
+def read_jsonl_rows(path: Path) -> list[dict[str, object]]:
+    """Read JSONL records from disk; missing files return an empty list."""
+
+    if not path.exists():
+        return []
+    rows: list[dict[str, object]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        payload = json.loads(line)
+        if isinstance(payload, dict):
+            rows.append(payload)
+    return rows
+
+
+def tool_audit_path(harness: "ACPDispatcherHarness", tool_name: str) -> Path:
+    """Return the per-tool audit JSONL path for the current harness run."""
+
+    return Path(harness.dispatcher._audit_run_dir) / "tools" / f"{tool_name}.jsonl"  # noqa: SLF001
+
+
+def read_tool_audit_rows(
+    harness: "ACPDispatcherHarness", tool_name: str
+) -> list[dict[str, object]]:
+    """Read current run's per-tool audit rows."""
+
+    return read_jsonl_rows(tool_audit_path(harness, tool_name))
 
 
 @dataclass

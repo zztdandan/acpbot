@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import shutil
 from pathlib import Path
 from typing import AsyncIterator
@@ -16,6 +15,7 @@ from .helpers import (
     build_acp_config,
     build_session_key,
     require_e2e_enabled,
+    stage_file_transport_workspace,
 )
 
 
@@ -49,7 +49,22 @@ def acp_e2e_workspace(tmp_path: Path) -> Path:
 
     workspace = tmp_path / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
+    stage_file_transport_workspace(workspace)
     return workspace
+
+
+@pytest.fixture
+def acp_e2e_fixture_dir(acp_e2e_workspace: Path) -> Path:
+    """Return staged FT fixture directory inside ACP workspace."""
+
+    return acp_e2e_workspace / "fixtures" / "file_transport"
+
+
+@pytest.fixture
+def acp_e2e_plugin_path(acp_e2e_workspace: Path) -> Path:
+    """Return staged plugin path inside ACP workspace."""
+
+    return acp_e2e_workspace / ".opencode" / "plugin" / "acp-send-file.ts"
 
 
 @pytest.fixture
@@ -62,7 +77,7 @@ async def acp_e2e_harness(
     del acp_e2e_data_root
     require_e2e_enabled()
 
-    config = build_acp_config()
+    config = build_acp_config(permission_policy="strict", honor_env_policy=False)
     # 中文注释：命令不存在时直接 skip，避免测试输出误导性连接错误。
     if shutil.which(config.command) is None:
         pytest.skip(f"ACP command not found in PATH: {config.command}")
@@ -83,17 +98,29 @@ async def acp_e2e_harness(
 
 
 @pytest.fixture
-def acp_e2e_case_dir() -> Path:
-    """Directory for manually prepared E2E case files.
+async def acp_e2e_trusted_harness(
+    acp_e2e_data_root: Path,
+    acp_e2e_workspace: Path,
+) -> AsyncIterator[ACPDispatcherHarness]:
+    """Create a trusted ACP harness used only by outbound plugin FT tests."""
 
-    中文注释：用户会手工准备出站附件类型 case；这里通过环境变量注入路径，
-    测试代码不绑定仓库固定目录。
-    """
+    del acp_e2e_data_root
+    require_e2e_enabled()
 
-    raw = os.getenv("NANOBOT_ACP_E2E_CASE_DIR", "").strip()
-    if not raw:
-        pytest.skip("NANOBOT_ACP_E2E_CASE_DIR is required for file-transport E2E cases")
-    path = Path(raw).expanduser().resolve()
-    if not path.exists() or not path.is_dir():
-        pytest.skip(f"NANOBOT_ACP_E2E_CASE_DIR is invalid: {path}")
-    return path
+    config = build_acp_config(permission_policy="trusted", honor_env_policy=False)
+    if shutil.which(config.command) is None:
+        pytest.skip(f"ACP command not found in PATH: {config.command}")
+
+    bus = MessageBus()
+    dispatcher = ACPDispatcher(
+        bus=bus,
+        workspace=acp_e2e_workspace,
+        acp_config=config,
+        channels_config=ChannelsConfig(send_final=True),
+    )
+    harness = ACPDispatcherHarness(dispatcher=dispatcher, bus=bus)
+    await harness.start()
+    try:
+        yield harness
+    finally:
+        await harness.stop()

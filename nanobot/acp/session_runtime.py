@@ -43,7 +43,14 @@ class _SessionRuntimePorts(Protocol):
 
     def _convert_mcp_servers(self) -> list[Any]: ...
 
-    def _build_inbound_prompt_blocks(self, content: str, media: list[str]) -> list[Any]: ...
+    def _build_inbound_prompt_blocks(
+        self,
+        content: str,
+        media: list[str],
+        *,
+        session_key: str,
+        channel: str,
+    ) -> list[Any]: ...
 
 
 async def _ensure_connection(runtime: _SessionRuntimePorts) -> None:
@@ -284,7 +291,7 @@ async def _process_direct_impl(
     on_progress: Callable[[str], Awaitable[None]] | None = None,
 ) -> str:
     """直接发送一轮 prompt 到指定 session，并返回聚合后的文本。"""
-    del channel, chat_id
+    del chat_id
     await _ensure_connection(runtime)
     if runtime._conn is None:
         raise RuntimeError("ACP connection is not available")
@@ -316,7 +323,12 @@ async def _process_direct_impl(
         for attempt in range(2):
             try:
                 await runtime._conn.prompt(
-                    prompt=runtime._build_inbound_prompt_blocks(content, media_paths),
+                    prompt=runtime._build_inbound_prompt_blocks(
+                        content,
+                        media_paths,
+                        session_key=session_key,
+                        channel=channel,
+                    ),
                     session_id=session_id,
                 )
                 break

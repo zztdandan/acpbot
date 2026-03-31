@@ -9,6 +9,7 @@ import pytest
 
 from nanobot.acp.dispatcher import ACPDispatcher
 from nanobot.acp.state import _StreamState
+from nanobot.acp.session_update_tool import _handle_tool_progress
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import ACPBackendConfig
@@ -604,20 +605,21 @@ async def test_outbound_metadata_strips_ws_preference_control_keys(
 
 
 @pytest.mark.asyncio
-async def test_dispatch_includes_text_media_as_resource_block_in_prompt(
+async def test_dispatch_includes_workspace_media_as_resource_link_in_prompt(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
     config_root = tmp_path / ".nanobot" / "config"
     monkeypatch.setattr("nanobot.acp.dispatcher.get_data_dir", lambda: config_root)
 
-    media_file = tmp_path / "sample.md"
-    media_file.write_text("# sample\n" + ("A" * (100 * 1024)), encoding="utf-8")
-
     bus = MessageBus()
+    workspace = tmp_path / "workspace-media-in"
+    workspace.mkdir(parents=True, exist_ok=True)
+    media_file = workspace / "sample.md"
+    media_file.write_text("# sample\n" + ("A" * (100 * 1024)), encoding="utf-8")
     dispatcher = ACPDispatcher(
         bus=bus,
-        workspace=tmp_path / "workspace-media-in",
+        workspace=workspace,
         acp_config=ACPBackendConfig(),
     )
     conn = _FakeConn()
@@ -644,7 +646,7 @@ async def test_dispatch_includes_text_media_as_resource_block_in_prompt(
     prompt_blocks = conn.prompt_payloads[0]
     assert len(prompt_blocks) >= 2
     assert getattr(prompt_blocks[0], "type", None) == "text"
-    assert getattr(prompt_blocks[1], "type", None) == "resource"
+    assert getattr(prompt_blocks[1], "type", None) == "resource_link"
 
 
 @pytest.mark.asyncio
@@ -684,6 +686,50 @@ async def test_handle_session_update_resource_link_writes_outbound_media_file(
     saved = Path(media_paths[0])
     assert saved.exists()
     assert saved.read_text(encoding="utf-8") == "hello from acp"
+
+
+@pytest.mark.asyncio
+async def test_tool_progress_completed_metadata_writes_outbound_media_file(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config_root = tmp_path / ".nanobot" / "config"
+    monkeypatch.setattr("nanobot.acp.dispatcher.get_data_dir", lambda: config_root)
+
+    source = tmp_path / "agent-output.txt"
+    source.write_text("hello from tool metadata", encoding="utf-8")
+
+    dispatcher = ACPDispatcher(
+        bus=MessageBus(),
+        workspace=tmp_path / "workspace-tool-out",
+        acp_config=ACPBackendConfig(),
+    )
+    session_id = "session-tool-1"
+    state = _StreamState()
+    dispatcher._session_states[session_id] = state
+    dispatcher._session_active_tool_name[session_id] = "acp_send_file"
+
+    update = SimpleNamespace(
+        status="completed",
+        title="acp_send_file",
+        rawOutput=SimpleNamespace(
+            metadata={
+                "acp_send_file": {
+                    "file": str(source),
+                    "filename": "copied-doctor.txt",
+                    "mime": "text/plain",
+                }
+            }
+        ),
+    )
+
+    await _handle_tool_progress(dispatcher, session_id, state, update)
+
+    media_paths = state.final_media()
+    assert len(media_paths) == 1
+    saved = Path(media_paths[0])
+    assert saved.exists()
+    assert saved.read_text(encoding="utf-8") == "hello from tool metadata"
 
 
 def test_dispatcher_initializes_runtime_state_maps(monkeypatch, tmp_path: Path) -> None:

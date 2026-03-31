@@ -18,7 +18,8 @@ async def test_e2e_000_bootstrap_and_handshake_smoke(
     await acp_e2e_harness.send_inbound(session_key=acp_e2e_session_key, content="hello")
     messages = await acp_e2e_harness.collect_outbound_until(
         stop_when=has_final_message,
-        total_timeout=15.0,
+        # 中文注释：build 模式恢复后可能先经历工具探索再产出 final，给足窗口避免把“仍在生成中”误判成失败。
+        total_timeout=40.0,
     )
 
     assert messages, "Expected at least one outbound message"
@@ -126,7 +127,9 @@ async def test_e2e_003_recover_after_a_control_error(
     )
     messages = await acp_e2e_harness.collect_outbound_until(
         stop_when=has_final_message,
-        total_timeout=15.0,
+        # 中文注释：recover 场景在 build mode 下可能先经历 glob/read，再产出 final，
+        # 这里延长等待窗口避免把“仍在生成中”误判成失败。
+        total_timeout=40.0,
     )
 
     assert messages

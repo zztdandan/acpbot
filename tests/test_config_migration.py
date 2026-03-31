@@ -5,6 +5,7 @@ from typer.testing import CliRunner
 
 from nanobot.cli.commands import app
 from nanobot.config.loader import load_config, save_config
+from nanobot.config.schema import ACPBackendConfig
 
 runner = CliRunner()
 
@@ -159,3 +160,9 @@ def test_load_config_accepts_acp_dispatch_block(tmp_path) -> None:
     assert config.dispatch.backend == "acp"
     assert config.dispatch.acp.command == "opencode"
     assert config.dispatch.acp.permissions_policy == "trusted"
+
+
+def test_acp_backend_config_has_inbound_media_dir_default() -> None:
+    cfg = ACPBackendConfig()
+
+    assert cfg.inbound_media_dir == "Download/channel-inbound/acp-dispatch"

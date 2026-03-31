@@ -34,6 +34,7 @@ async def _handle_tool_start(dispatcher: Any, session_id: str, state: Any, updat
         event="tool_start",
         payload={
             "title": title,
+            "tool_name": tool_name,
             "tool_call": update,
         },
     )
@@ -75,9 +76,16 @@ async def _handle_tool_progress(dispatcher: Any, session_id: str, state: Any, up
         event="tool_progress",
         payload={
             "status": status,
+            "tool_name": tool_name,
             "tool_call": update,
         },
     )
+    if status == "completed":
+        media_path = dispatcher._extract_tool_output_media_path(update)
+        if media_path:
+            # 中文注释：当 ACP 后端未额外回放 attachment block 时，
+            # 允许从工具完成态 metadata 兜底补回附件路径，保持 FT 回路闭环。
+            state.add_media(media_path)
     if status:
         await dispatcher._emit_progress(
             state.on_progress,

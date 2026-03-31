@@ -191,7 +191,9 @@ class ACPBackendConfig(Base):
     env: dict[str, str] = Field(default_factory=dict)
     protocol_version: int = 1
     permissions_policy: Literal["strict", "trusted", "yolo"] = "strict"
+    # 中文注释：入站附件若需要在 dispatch 层落盘，统一写到 workspace 下该相对目录。
     startup_timeout_seconds: int = 20
+    inbound_media_dir: str = "Download/channel-inbound/acp-dispatch"
     default_model: str = "xaio/Kimi-K2.5"
     default_mode: str = "OpenCode-Builder"
 

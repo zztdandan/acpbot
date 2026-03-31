@@ -1,22 +1,17 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 import pytest
 
-from .helpers import ensure_contains_any
+from .helpers import ensure_contains_any, read_tool_audit_rows, staged_fixture_path
 
 
 async def _install_prompt_recorder(acp_e2e_harness) -> list[list[Any]]:
-    """Patch conn.prompt to record the exact prompt blocks sent to ACP.
-
-    中文注释：文件传输 E2E 的核心不是“模型回了什么文案”，而是
-    dispatch 是否按约定把 media 变成 `resource_link` 下发给 ACP。
-    因此这里直接记录 prompt payload，保证断言可解释、可复现。
-    """
+    """Patch conn.prompt to record the exact prompt blocks sent to ACP."""
 
     await acp_e2e_harness.dispatcher._ensure_connection()  # noqa: SLF001
     conn = acp_e2e_harness.dispatcher._conn  # noqa: SLF001
@@ -35,146 +30,304 @@ async def _install_prompt_recorder(acp_e2e_harness) -> list[list[Any]]:
 
 
 def _block_types(blocks: list[Any]) -> list[str]:
-    """Extract `type` fields from ACP content blocks."""
-
-    types: list[str] = []
-    for block in blocks:
-        block_type = getattr(block, "type", None)
-        if isinstance(block_type, str):
-            types.append(block_type)
-    return types
+    return [str(getattr(block, "type", "")) for block in blocks]
 
 
-@pytest.mark.asyncio
-async def test_e2e_ft_001_single_file_is_injected_as_resource_link(
-    acp_e2e_harness,
-    acp_e2e_session_key: str,
-    tmp_path: Path,
-) -> None:
-    """E2E-FT-001: 单文件入站时，ACP prompt 应看到 resource_link。"""
+def _resource_link_blocks(blocks: list[Any]) -> list[Any]:
+    return [block for block in blocks if getattr(block, "type", None) == "resource_link"]
 
-    records = await _install_prompt_recorder(acp_e2e_harness)
 
-    sample = tmp_path / "ft001.txt"
-    sample.write_text("ACP_E2E_FILE_SINGLE_TOKEN\n", encoding="utf-8")
+def _resource_link_path(block: Any) -> Path:
+    parsed = urlparse(str(getattr(block, "uri", "") or ""))
+    return Path(unquote(parsed.path))
 
-    await acp_e2e_harness.send_inbound(
-        session_key=acp_e2e_session_key,
-        content="Read attached file and include token ACP_E2E_FILE_SINGLE_TOKEN in answer.",
-        media=[str(sample)],
-    )
-    messages = await acp_e2e_harness.collect_outbound_until_idle(total_timeout=120)
 
+def _latest_prompt_blocks(records: list[list[Any]]) -> list[Any]:
     assert records, "Expected at least one prompt call to ACP"
-    types = _block_types(records[-1])
-    # 中文注释：这里明确锁定“入站附件统一 resource_link”目标契约；
-    # 若当前实现仍走 embedded resource，此断言会失败，便于逐步调试修复。
-    assert types.count("resource_link") == 1
-    assert "resource" not in types
-    assert ensure_contains_any(messages, ["ACP_E2E_FILE_SINGLE_TOKEN", "ft001.txt"])
+    return records[-1]
 
 
-@pytest.mark.asyncio
-async def test_e2e_ft_002_multi_files_can_be_injected_in_one_prompt(
-    acp_e2e_harness,
-    acp_e2e_session_key: str,
-    tmp_path: Path,
-) -> None:
-    """E2E-FT-002: 多文件允许同轮注入，且均为 resource_link。"""
+def _outbound_media_paths(messages: list[Any]) -> list[Path]:
+    paths: list[Path] = []
+    for msg in messages:
+        for media_path in list(msg.media or []):
+            paths.append(Path(media_path))
+    return paths
 
-    records = await _install_prompt_recorder(acp_e2e_harness)
 
-    file_a = tmp_path / "ft002-a.txt"
-    file_b = tmp_path / "ft002-b.txt"
-    file_a.write_text("TOKEN_A\n", encoding="utf-8")
-    file_b.write_text("TOKEN_B\n", encoding="utf-8")
-
-    await acp_e2e_harness.send_inbound(
-        session_key=acp_e2e_session_key,
-        content="Read both files, then output TOKEN_A and TOKEN_B.",
-        media=[str(file_a), str(file_b)],
+def _send_file_prompt(*, relative_path: str, marker: str) -> str:
+    return (
+        "Use the acp_send_file tool exactly once. "
+        f'Set filePath="{relative_path}" and filename="{marker}". '
+        "Do not describe the file before calling the tool."
     )
-    messages = await acp_e2e_harness.collect_outbound_until_idle(total_timeout=120)
-
-    assert records, "Expected prompt payload for multi-file inbound"
-    types = _block_types(records[-1])
-    assert types.count("resource_link") == 2
-    assert "resource" not in types
-    assert ensure_contains_any(messages, ["TOKEN_A", "TOKEN_B", "ft002-a.txt", "ft002-b.txt"])
 
 
 @pytest.mark.asyncio
-async def test_e2e_ft_003_multi_file_response_accepts_multi_message_output(
+async def test_acp_e2e_workspace_contains_plugin_and_file_transport_fixtures(
+    acp_e2e_workspace: Path,
+    acp_e2e_fixture_dir: Path,
+    acp_e2e_plugin_path: Path,
+) -> None:
+    assert (
+        acp_e2e_workspace.joinpath(".opencode", "plugin", "acp-send-file.ts") == acp_e2e_plugin_path
+    )
+    assert acp_e2e_plugin_path.is_file()
+    assert acp_e2e_fixture_dir.joinpath("doctor.txt").is_file()
+    assert acp_e2e_fixture_dir.joinpath("Embeding_16.png").is_file()
+    assert acp_e2e_fixture_dir.joinpath("6a489f05-0270-44e9-98b1-68df708c7c4f_hd.mp4").is_file()
+
+
+@pytest.mark.asyncio
+async def test_acp_e2e_plugin_fixture_is_loadable_by_outbound_smoke(
+    acp_e2e_trusted_harness,
+    acp_e2e_session_key: str,
+) -> None:
+    marker = f"ft-plugin-smoke-{acp_e2e_session_key}"
+    before = read_tool_audit_rows(acp_e2e_trusted_harness, "acp_send_file")
+
+    await acp_e2e_trusted_harness.send_inbound(
+        session_key=acp_e2e_session_key,
+        content=_send_file_prompt(
+            relative_path="fixtures/file_transport/doctor.txt", marker=marker
+        ),
+    )
+    _ = await acp_e2e_trusted_harness.collect_outbound_until(
+        stop_when=lambda messages: bool(messages),
+        total_timeout=120.0,
+    )
+
+    after = read_tool_audit_rows(acp_e2e_trusted_harness, "acp_send_file")
+    new_rows = after[len(before) :]
+
+    assert any(
+        row.get("event") == "tool_start"
+        and row.get("tool_name") == "acp_send_file"
+        and row.get("sessionKey") == acp_e2e_session_key
+        for row in new_rows
+    )
+    assert any(marker in str(row) for row in new_rows)
+
+
+@pytest.mark.asyncio
+async def test_e2e_ft_001_doctor_txt_is_injected_as_resource_link(
     acp_e2e_harness,
     acp_e2e_session_key: str,
-    tmp_path: Path,
+    acp_e2e_fixture_dir: Path,
 ) -> None:
-    """E2E-FT-003: 多文件场景允许多条 outbound，只校验最小结果集合。"""
-
-    alpha = tmp_path / "ft003-alpha.txt"
-    beta = tmp_path / "ft003-beta.txt"
-    alpha.write_text("ALPHA_CONTENT\n", encoding="utf-8")
-    beta.write_text("BETA_CONTENT\n", encoding="utf-8")
+    records = await _install_prompt_recorder(acp_e2e_harness)
+    doctor = acp_e2e_fixture_dir / "doctor.txt"
 
     await acp_e2e_harness.send_inbound(
         session_key=acp_e2e_session_key,
         content=(
-            "Summarize each attachment separately. "
-            "Your output may contain multiple messages, but must mention ALPHA_CONTENT and BETA_CONTENT."
+            "Read the attached text file, repeat the exact sentence from the file, "
+            "and mention doctor.txt in your answer."
         ),
-        media=[str(alpha), str(beta)],
+        media=[str(doctor)],
     )
-    messages = await acp_e2e_harness.collect_outbound_until_idle(total_timeout=120)
+    messages = await acp_e2e_harness.collect_outbound_until(
+        stop_when=lambda rows: ensure_contains_any(
+            rows, ["i am a doctor,my name is zzt", "doctor.txt"]
+        ),
+        total_timeout=120,
+    )
 
-    assert messages
-    assert ensure_contains_any(messages, ["ALPHA_CONTENT", "BETA_CONTENT", "alpha", "beta"])
+    blocks = _latest_prompt_blocks(records)
+    resource_links = _resource_link_blocks(blocks)
+    assert _block_types(blocks) == ["text", "resource_link"]
+    assert len(resource_links) == 1
+    assert getattr(resource_links[0], "name", None) == "doctor.txt"
+    assert _resource_link_path(resource_links[0]) == doctor.resolve()
+    assert ensure_contains_any(messages, ["i am a doctor,my name is zzt", "doctor.txt"])
 
 
 @pytest.mark.asyncio
-async def test_e2e_ft_004_outbound_attachment_type_cases_match_expected_contract(
+async def test_e2e_ft_002_png_and_mp4_are_injected_as_resource_links(
     acp_e2e_harness,
     acp_e2e_session_key: str,
-    acp_e2e_case_dir: Path,
+    acp_e2e_fixture_dir: Path,
 ) -> None:
-    """E2E-FT-004: 由用户准备 case，验证附件类型与契约是否匹配。
-
-    约定：`NANOBOT_ACP_E2E_CASE_DIR/outbound_case_manifest.json` 提供测试清单。
-    当前先做结构校验与运行入口，具体 case 内容由调试阶段逐步完善。
-    """
-
-    manifest = acp_e2e_case_dir / "outbound_case_manifest.json"
-    if not manifest.exists():
-        pytest.skip(f"Missing manifest file: {manifest}")
-
-    data = json.loads(manifest.read_text(encoding="utf-8"))
-    cases = data.get("cases") if isinstance(data, dict) else None
-    if not isinstance(cases, list) or not cases:
-        pytest.skip("No usable outbound type cases found in manifest")
-
-    # 中文注释：当前阶段先保留最小入口，后续按你的真实 case 逐条落地断言。
-    first = cases[0]
-    prompt = first.get("prompt") if isinstance(first, dict) else None
-    if not isinstance(prompt, str) or not prompt.strip():
-        pytest.skip("Manifest first case does not provide a valid prompt")
+    records = await _install_prompt_recorder(acp_e2e_harness)
+    png = acp_e2e_fixture_dir / "Embeding_16.png"
+    mp4 = acp_e2e_fixture_dir / "6a489f05-0270-44e9-98b1-68df708c7c4f_hd.mp4"
 
     await acp_e2e_harness.send_inbound(
         session_key=acp_e2e_session_key,
-        content=prompt,
+        content=(
+            "For each attachment, mention the file type and the file address/basename. "
+            "You must mention Embeding_16.png and 6a489f05-0270-44e9-98b1-68df708c7c4f_hd.mp4."
+        ),
+        media=[str(png), str(mp4)],
     )
-    messages = await acp_e2e_harness.collect_outbound_until_idle(total_timeout=120)
+    messages = await acp_e2e_harness.collect_outbound_until(
+        stop_when=lambda rows: ensure_contains_any(rows, [png.name, mp4.name]),
+        total_timeout=120,
+    )
 
-    assert messages
+    blocks = _latest_prompt_blocks(records)
+    resource_links = _resource_link_blocks(blocks)
+    assert _block_types(blocks) == ["text", "resource_link", "resource_link"]
+    assert [getattr(block, "name", None) for block in resource_links] == [png.name, mp4.name]
+    assert [_resource_link_path(block) for block in resource_links] == [
+        png.resolve(),
+        mp4.resolve(),
+    ]
+    assert ensure_contains_any(messages, [png.name, mp4.name])
 
 
 @pytest.mark.asyncio
-async def test_e2e_ft_005_outbound_paths_are_safe_and_traceable(
+async def test_e2e_ft_003_three_staged_files_share_one_prompt(
+    acp_e2e_harness,
+    acp_e2e_session_key: str,
+    acp_e2e_fixture_dir: Path,
+) -> None:
+    records = await _install_prompt_recorder(acp_e2e_harness)
+    doctor = acp_e2e_fixture_dir / "doctor.txt"
+    png = acp_e2e_fixture_dir / "Embeding_16.png"
+    mp4 = acp_e2e_fixture_dir / "6a489f05-0270-44e9-98b1-68df708c7c4f_hd.mp4"
+
+    await acp_e2e_harness.send_inbound(
+        session_key=acp_e2e_session_key,
+        content=(
+            "Process all three attachments in one round. Repeat the text file sentence, "
+            "and mention both non-text basenames in the response."
+        ),
+        media=[str(doctor), str(png), str(mp4)],
+    )
+    messages = await acp_e2e_harness.collect_outbound_until(
+        stop_when=lambda rows: ensure_contains_any(
+            rows, ["i am a doctor,my name is zzt", png.name, mp4.name]
+        ),
+        total_timeout=120,
+    )
+
+    blocks = _latest_prompt_blocks(records)
+    resource_links = _resource_link_blocks(blocks)
+    assert _block_types(blocks) == ["text", "resource_link", "resource_link", "resource_link"]
+    assert [getattr(block, "name", None) for block in resource_links] == [
+        doctor.name,
+        png.name,
+        mp4.name,
+    ]
+    assert [_resource_link_path(block) for block in resource_links] == [
+        doctor.resolve(),
+        png.resolve(),
+        mp4.resolve(),
+    ]
+    assert ensure_contains_any(messages, ["i am a doctor,my name is zzt", png.name, mp4.name])
+
+
+@pytest.mark.asyncio
+async def test_acp_e2e_trusted_harness_overrides_permission_policy_only_for_outbound(
+    acp_e2e_harness,
+    acp_e2e_trusted_harness,
+) -> None:
+    assert acp_e2e_harness.dispatcher.acp_config.permissions_policy == "strict"
+    assert acp_e2e_trusted_harness.dispatcher.acp_config.permissions_policy == "trusted"
+
+
+@pytest.mark.asyncio
+async def test_acp_send_file_is_denied_under_default_strict_harness(
     acp_e2e_harness,
     acp_e2e_session_key: str,
 ) -> None:
-    """E2E-FT-005: 出站落盘路径安全/可追踪（占位入口，后续逐条补断言）。"""
+    marker = f"ft-strict-{acp_e2e_session_key}"
+    before = read_tool_audit_rows(acp_e2e_harness, "acp_send_file")
 
-    # 中文注释：该项依赖具体附件 case（例如 resource_link/blob/image），
-    # 当前先保留执行入口；你提供 case 后，我们再把路径规则断言补齐。
-    pytest.skip(
-        "Pending concrete outbound attachment cases; will assert safe naming and workspace-bound paths"
+    await acp_e2e_harness.send_inbound(
+        session_key=acp_e2e_session_key,
+        content=_send_file_prompt(
+            relative_path="fixtures/file_transport/doctor.txt", marker=marker
+        ),
     )
+    messages = await acp_e2e_harness.collect_outbound_until_idle(total_timeout=120.0)
+    after = read_tool_audit_rows(acp_e2e_harness, "acp_send_file")
+
+    assert _outbound_media_paths(messages) == []
+    assert len(after) >= len(before)
+
+
+@pytest.mark.asyncio
+async def test_e2e_ft_004_acp_send_file_emits_outbound_media_path(
+    acp_e2e_trusted_harness,
+    acp_e2e_session_key: str,
+) -> None:
+    marker = f"ft-outbound-{acp_e2e_session_key}.txt"
+    before = read_tool_audit_rows(acp_e2e_trusted_harness, "acp_send_file")
+
+    await acp_e2e_trusted_harness.send_inbound(
+        session_key=acp_e2e_session_key,
+        content=_send_file_prompt(
+            relative_path="fixtures/file_transport/doctor.txt", marker=marker
+        ),
+    )
+    messages = await acp_e2e_trusted_harness.collect_outbound_until(
+        stop_when=lambda rows: bool(_outbound_media_paths(rows)),
+        total_timeout=120.0,
+    )
+
+    media_paths = _outbound_media_paths(messages)
+    after = read_tool_audit_rows(acp_e2e_trusted_harness, "acp_send_file")
+    new_rows = after[len(before) :]
+
+    assert media_paths
+    assert all(path.is_file() for path in media_paths)
+    assert all(
+        path.is_relative_to(
+            acp_e2e_trusted_harness.dispatcher.workspace / "Download" / "acp-outbound"
+        )
+        for path in media_paths
+    )
+    assert any(
+        row.get("event") == "tool_start"
+        and row.get("tool_name") == "acp_send_file"
+        and row.get("sessionKey") == acp_e2e_session_key
+        for row in new_rows
+    )
+    assert any(marker in str(row) for row in new_rows)
+
+
+@pytest.mark.asyncio
+async def test_e2e_ft_005_each_sample_file_lands_under_download_acp_outbound(
+    acp_e2e_trusted_harness,
+    acp_e2e_session_key: str,
+    acp_e2e_workspace: Path,
+) -> None:
+    outbound_root = acp_e2e_workspace / "Download" / "acp-outbound"
+    samples = [
+        "doctor.txt",
+        "Embeding_16.png",
+        "6a489f05-0270-44e9-98b1-68df708c7c4f_hd.mp4",
+    ]
+
+    for index, sample in enumerate(samples, start=1):
+        marker = f"ft-outbound-{index}-{acp_e2e_session_key}-{sample}"
+        before = read_tool_audit_rows(acp_e2e_trusted_harness, "acp_send_file")
+        await acp_e2e_trusted_harness.send_inbound(
+            session_key=acp_e2e_session_key,
+            content=_send_file_prompt(
+                relative_path=str(
+                    staged_fixture_path(acp_e2e_workspace, sample).relative_to(acp_e2e_workspace)
+                ),
+                marker=marker,
+            ),
+        )
+        messages = await acp_e2e_trusted_harness.collect_outbound_until(
+            stop_when=lambda rows: bool(_outbound_media_paths(rows)),
+            total_timeout=120.0,
+        )
+        media_paths = _outbound_media_paths(messages)
+        after = read_tool_audit_rows(acp_e2e_trusted_harness, "acp_send_file")
+        new_rows = after[len(before) :]
+
+        assert media_paths
+        assert all(path.is_file() for path in media_paths)
+        assert all(path.is_relative_to(outbound_root) for path in media_paths)
+        assert any(
+            row.get("event") == "tool_start"
+            and row.get("tool_name") == "acp_send_file"
+            and row.get("sessionKey") == acp_e2e_session_key
+            for row in new_rows
+        )
+        assert any(marker in str(row) for row in new_rows)

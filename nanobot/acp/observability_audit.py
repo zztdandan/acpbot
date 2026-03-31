@@ -203,6 +203,7 @@ class _ACPObservabilityAuditMixin:
                 "event": event,
                 "recordedAt": datetime.now(timezone.utc).isoformat(),
                 "runId": self._audit_run_id,  # type: ignore[attr-defined]
+                "tool_name": tool_name,
                 "sessionId": session_id,
                 "sessionKey": session_key,
                 "payload": payload,

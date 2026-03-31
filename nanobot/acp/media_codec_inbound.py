@@ -2,140 +2,174 @@
 
 from __future__ import annotations
 
-import base64
 import mimetypes
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 from loguru import logger
 
 
 class _ACPInboundMediaCodecMixin:
-    """封装 inbound media filepath -> ACP prompt blocks 逻辑。"""
+    """封装 inbound media -> ACP `resource_link` blocks 逻辑。"""
 
-    _INLINE_TEXT_BYTES_LIMIT = 512 * 1024
-    _INLINE_BLOB_BYTES_LIMIT = 2 * 1024 * 1024
+    workspace: Path
+    acp_config: Any
 
     @staticmethod
-    def _is_text_like_mime(path: Path, mime_type: str | None) -> bool:
-        """判断文件是否适合按文本内嵌到 ACP resource。"""
-        if mime_type and (
-            mime_type.startswith("text/")
-            or mime_type
-            in {
-                "application/json",
-                "application/xml",
-                "application/x-yaml",
-                "application/yaml",
-                "application/javascript",
-            }
-        ):
-            return True
-        return path.suffix.lower() in {
-            ".txt",
-            ".md",
-            ".markdown",
-            ".json",
-            ".jsonl",
-            ".yaml",
-            ".yml",
-            ".xml",
-            ".csv",
-            ".py",
-            ".js",
-            ".ts",
-            ".tsx",
-            ".jsx",
-            ".java",
-            ".go",
-            ".rs",
-            ".c",
-            ".cpp",
-            ".h",
-            ".hpp",
-            ".sh",
-            ".bash",
-            ".zsh",
-            ".toml",
-            ".ini",
-            ".cfg",
-            ".conf",
-            ".log",
-        }
+    def _acp_text_block(content: str) -> Any:
+        raise NotImplementedError
 
-    def _build_inbound_prompt_blocks(self, content: str, media: list[str]) -> list[Any]:
-        """把 inbound 文本+附件规范化为 ACP prompt blocks。"""
-        blocks: list[Any] = [self._acp_text_block(content)]
-        for raw_path in media:
-            path = Path(str(raw_path)).expanduser()
-            if not path.is_file():
-                logger.warning("ACP inbound media skipped (not file): {}", raw_path)
-                continue
-            try:
-                abs_path = path.resolve()
-            except Exception as e:
-                logger.warning("ACP inbound media resolve failed path={} err={}", raw_path, e)
-                continue
-            try:
-                file_size = abs_path.stat().st_size
-            except OSError as e:
-                logger.warning("ACP inbound media stat failed path={} err={}", abs_path, e)
-                continue
+    @staticmethod
+    def _acp_resource_link_block(
+        name: str,
+        uri: str,
+        *,
+        mime_type: str | None,
+        size: int | None,
+    ) -> Any:
+        raise NotImplementedError
 
-            mime_type = mimetypes.guess_type(abs_path.name)[0] or "application/octet-stream"
-            file_uri = abs_path.as_uri()
-            file_name = abs_path.name
+    @staticmethod
+    def _summarize_inbound_media(raw_media: object) -> str:
+        """生成安全摘要，便于审计时定位被拒绝输入。"""
 
-            try:
-                if mime_type.startswith("image/") and file_size <= self._INLINE_BLOB_BYTES_LIMIT:
-                    # 中文注释：图片走 image block，兼容具备多模态能力的 ACP/OpenCode 模型。
-                    b64 = base64.b64encode(abs_path.read_bytes()).decode("ascii")
-                    blocks.append(
-                        self._acp_image_block(
-                            data=b64,
-                            mime_type=mime_type,
-                            uri=file_uri,
-                        )
-                    )
-                    continue
-                if (
-                    self._is_text_like_mime(abs_path, mime_type)
-                    and file_size <= self._INLINE_TEXT_BYTES_LIMIT
-                ):
-                    # 中文注释：文本文件优先内嵌为 resource(text)，减少 ACP 侧额外拉取文件步骤。
-                    text_data = abs_path.read_text(encoding="utf-8", errors="replace")
-                    resource = self._acp_embedded_text_resource(
-                        uri=file_uri,
-                        text=text_data,
-                        mime_type=mime_type,
-                    )
-                    blocks.append(self._acp_resource_block(resource))
-                    continue
-                if file_size <= self._INLINE_BLOB_BYTES_LIMIT:
-                    # 中文注释：小体积二进制可直接嵌入 blob，避免 file:// 访问权限差异导致失败。
-                    b64 = base64.b64encode(abs_path.read_bytes()).decode("ascii")
-                    resource = self._acp_embedded_blob_resource(
-                        uri=file_uri,
-                        blob=b64,
-                        mime_type=mime_type,
-                    )
-                    blocks.append(self._acp_resource_block(resource))
-                    continue
-            except Exception as e:
-                logger.warning(
-                    "ACP inbound media inline conversion failed path={} mime={} err={}",
-                    abs_path,
-                    mime_type,
-                    e,
+        if isinstance(raw_media, str):
+            parsed = urlparse(raw_media)
+            if parsed.scheme:
+                return f"scheme={parsed.scheme} path={unquote(parsed.path)[:200]}"
+            return f"path={raw_media[:200]}"
+        return f"repr={type(raw_media).__name__}"
+
+    def _log_inbound_media_rejection(
+        self,
+        *,
+        raw_media: object,
+        reason: str,
+        session_key: str,
+        channel: str,
+    ) -> None:
+        """记录 error 级别拒绝日志，保留审计所需上下文。"""
+
+        logger.error(
+            "ACP inbound media rejected rejected_media_type={} reason={} session_key={} channel={} summary={}",
+            type(raw_media).__name__,
+            reason,
+            session_key,
+            channel,
+            self._summarize_inbound_media(raw_media),
+        )
+
+    def _resolve_inbound_media_dir(self) -> Path:
+        """解析并约束 inbound materialize 目录始终位于 workspace 内。"""
+
+        workspace = self.workspace.resolve()
+        raw_dir = (
+            str(getattr(self.acp_config, "inbound_media_dir", "") or "").strip()
+            or "Download/channel-inbound/acp-dispatch"
+        )
+        candidate = Path(raw_dir).expanduser()
+        if not candidate.is_absolute():
+            candidate = workspace / candidate
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            resolved = (workspace / "Download" / "channel-inbound" / "acp-dispatch").resolve()
+        if not resolved.is_relative_to(workspace):
+            # 中文注释：materialize 目录语义必须绑定到 workspace，禁止穿透到外部目录。
+            logger.warning(
+                "ACP inbound media dir escaped workspace configured={} workspace={} fallback=default",
+                raw_dir,
+                workspace,
+            )
+            resolved = (workspace / "Download" / "channel-inbound" / "acp-dispatch").resolve()
+        return resolved
+
+    def _normalize_inbound_media_paths(
+        self,
+        media: list[str],
+        *,
+        session_key: str,
+        channel: str,
+    ) -> list[Path]:
+        """把可安全识别的 inbound media 统一归一化为 workspace 内本地文件。"""
+
+        workspace = self.workspace.resolve()
+        normalized: list[Path] = []
+        _ = self._resolve_inbound_media_dir()
+        for raw_media in media:
+            parsed = urlparse(raw_media)
+            if parsed.scheme and parsed.scheme != "file":
+                # 中文注释：当前 FT 仅接受本地文件路径/file:// URI，其他 scheme 一律拒绝。
+                self._log_inbound_media_rejection(
+                    raw_media=raw_media,
+                    reason="unsupported_scheme",
+                    session_key=session_key,
+                    channel=channel,
                 )
+                continue
 
-            # 中文注释：超大文件或内嵌失败时降级为 resource_link，避免整轮 prompt 失败。
+            if parsed.scheme == "file":
+                candidate = Path(unquote(parsed.path)).expanduser()
+            else:
+                candidate = Path(raw_media).expanduser()
+                if not candidate.is_absolute():
+                    candidate = workspace / candidate
+
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                self._log_inbound_media_rejection(
+                    raw_media=raw_media,
+                    reason="resolve_failed",
+                    session_key=session_key,
+                    channel=channel,
+                )
+                continue
+
+            if not resolved.is_relative_to(workspace):
+                self._log_inbound_media_rejection(
+                    raw_media=raw_media,
+                    reason="outside_workspace",
+                    session_key=session_key,
+                    channel=channel,
+                )
+                continue
+            if not resolved.is_file():
+                self._log_inbound_media_rejection(
+                    raw_media=raw_media,
+                    reason="missing_file",
+                    session_key=session_key,
+                    channel=channel,
+                )
+                continue
+            normalized.append(resolved)
+        return normalized
+
+    def _build_inbound_prompt_blocks(
+        self,
+        content: str,
+        media: list[str],
+        *,
+        session_key: str,
+        channel: str,
+    ) -> list[Any]:
+        """把 inbound 文本+附件规范化为 ACP prompt blocks。"""
+
+        blocks: list[Any] = [self._acp_text_block(content)]
+        for path in self._normalize_inbound_media_paths(
+            media,
+            session_key=session_key,
+            channel=channel,
+        ):
+            mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            # 中文注释：FT 范围统一输出 resource_link，避免 inline resource/image 受模型能力差异影响。
             blocks.append(
                 self._acp_resource_link_block(
-                    name=file_name,
-                    uri=file_uri,
+                    name=path.name,
+                    uri=path.as_uri(),
                     mime_type=mime_type,
-                    size=file_size,
+                    size=path.stat().st_size,
                 )
             )
         return blocks
