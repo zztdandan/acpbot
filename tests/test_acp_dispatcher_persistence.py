@@ -75,6 +75,29 @@ class _FakeConnListAuthoritativeEmpty:
         return {"sessions": []}
 
 
+class _FakeConnStartupLazyActivation:
+    def __init__(self, existing_session_ids: set[str]) -> None:
+        self._existing_session_ids = set(existing_session_ids)
+        self.resume_calls: list[str] = []
+        self.load_calls: list[str] = []
+
+    async def list_sessions(self, cwd: str | None = None):
+        del cwd
+        return {
+            "sessions": [{"sessionId": sid} for sid in sorted(self._existing_session_ids)],
+        }
+
+    async def resume_session(self, cwd: str, session_id: str, mcp_servers: list[object]):
+        del cwd, mcp_servers
+        self.resume_calls.append(session_id)
+        return SimpleNamespace()
+
+    async def load_session(self, cwd: str, session_id: str, mcp_servers: list[object]):
+        del cwd, mcp_servers
+        self.load_calls.append(session_id)
+        return SimpleNamespace()
+
+
 class _FakeConnWithActivation(_FakeConn):
     def __init__(self, existing_session_ids: set[str] | None = None) -> None:
         super().__init__(existing_session_ids=existing_session_ids)
@@ -397,6 +420,98 @@ async def test_bootstrap_reconcile_keeps_map_when_authoritative_list_is_empty(
         "websocket:web-chat-b": "ses-old-1",
         "telegram:live": "ses-old-2",
     }
+
+
+@pytest.mark.asyncio
+async def test_startup_reconcile_stays_lazy_and_skips_resume_load(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config_root = tmp_path / ".nanobot" / "config"
+    config_root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("nanobot.acp.dispatcher.get_data_dir", lambda: config_root)
+
+    workspace = tmp_path / "workspace-startup-lazy"
+    cwd_value = str(workspace.resolve())
+    _map_file(config_root).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "mappings": [
+                    {
+                        "cwd": cwd_value,
+                        "nanobotSideSessionKey": "telegram:lazy",
+                        "acpSideSessionId": "sid-lazy",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    dispatcher = ACPDispatcher(
+        bus=MessageBus(),
+        workspace=workspace,
+        acp_config=ACPBackendConfig(),
+    )
+    conn = _FakeConnStartupLazyActivation(existing_session_ids={"sid-lazy"})
+    dispatcher._conn = conn
+
+    await dispatcher._bootstrap_session_map()
+
+    # 中文注释：启动期对账只做 map/list 比对，不允许触发会话激活（resume/load）。
+    assert dispatcher._session_map == {"telegram:lazy": "sid-lazy"}
+    assert conn.resume_calls == []
+    assert conn.load_calls == []
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_reconcile_uses_lazy_activation_on_first_ensure(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config_root = tmp_path / ".nanobot" / "config"
+    config_root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("nanobot.acp.dispatcher.get_data_dir", lambda: config_root)
+
+    workspace = tmp_path / "workspace-bootstrap-reconcile-lazy"
+    cwd_value = str(workspace.resolve())
+    _map_file(config_root).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "mappings": [
+                    {
+                        "cwd": cwd_value,
+                        "nanobotSideSessionKey": "telegram:lazy-ensure",
+                        "acpSideSessionId": "sid-lazy-ensure",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    dispatcher = ACPDispatcher(
+        bus=MessageBus(),
+        workspace=workspace,
+        acp_config=ACPBackendConfig(),
+    )
+    conn = _FakeConnStartupLazyActivation(existing_session_ids={"sid-lazy-ensure"})
+    dispatcher._conn = conn
+    dispatcher._convert_mcp_servers = lambda: []
+
+    await dispatcher._bootstrap_session_map()
+    session_id = await dispatcher._ensure_session("telegram:lazy-ensure")
+
+    # 中文注释：懒激活仅在首轮 ensure 才触发，启动对账本身不触发激活。
+    assert session_id == "sid-lazy-ensure"
+    assert conn.resume_calls == ["sid-lazy-ensure"]
+    assert conn.load_calls == []
 
 
 @pytest.mark.asyncio
