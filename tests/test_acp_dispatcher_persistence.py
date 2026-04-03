@@ -95,6 +95,19 @@ class _FakeConnWithActivation(_FakeConn):
         )
 
 
+class _FakeConnWithActivationReplayFailureOnce(_FakeConnWithActivation):
+    def __init__(self, existing_session_ids: set[str] | None = None) -> None:
+        super().__init__(existing_session_ids=existing_session_ids)
+        self._fail_model_once = True
+
+    async def set_session_model(self, model_id: str, session_id: str) -> None:
+        self.model_calls.append((session_id, model_id))
+        if self._fail_model_once:
+            self._fail_model_once = False
+            # 中文注释：模拟 desired 回放首轮失败，下一轮 ensure 再重试成功。
+            raise RuntimeError("replay model apply failed")
+
+
 class _FakeConnInvalidParamsRebind(_FakeConnWithActivation):
     def __init__(self, existing_session_ids: set[str] | None = None) -> None:
         super().__init__(existing_session_ids=existing_session_ids)
@@ -409,6 +422,11 @@ async def test_new_command_removes_old_mapping_and_new_mapping_replaces_it(
 
     dispatcher._ensure_connection = _noop
     first_session_id = await dispatcher._ensure_session("telegram:chat-1")
+    dispatcher._session_desired["telegram:chat-1"] = {
+        "model": "anthropic/claude-sonnet-4",
+        "agent": "plan",
+    }
+    dispatcher._persist_session_map()
 
     await dispatcher._dispatch(
         InboundMessage(
@@ -421,6 +439,10 @@ async def test_new_command_removes_old_mapping_and_new_mapping_replaces_it(
     outbound = await bus.consume_outbound()
     assert outbound.content == "New session started."
     assert "telegram:chat-1" not in dispatcher._session_map
+    assert "telegram:chat-1" not in dispatcher._session_desired
+
+    mappings_after_new = _read_mappings(_map_file(config_root))
+    assert mappings_after_new == []
 
     second_session_id = await dispatcher._ensure_session("telegram:chat-1")
     assert second_session_id != first_session_id
@@ -429,6 +451,56 @@ async def test_new_command_removes_old_mapping_and_new_mapping_replaces_it(
     assert len(mappings) == 1
     assert mappings[0]["nanobotSideSessionKey"] == "telegram:chat-1"
     assert mappings[0]["acpSideSessionId"] == second_session_id
+
+
+@pytest.mark.asyncio
+async def test_ensure_connection_rollback_cleans_state_even_when_aexit_raises(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    dispatcher = ACPDispatcher(
+        bus=MessageBus(),
+        workspace=tmp_path / "workspace-rollback-clean",
+        acp_config=ACPBackendConfig(),
+    )
+
+    warning_calls: list[str] = []
+
+    def _capture_warning(message: str, *args: object, **kwargs: object) -> None:
+        del kwargs
+        warning_calls.append(message.format(*args))
+
+    class _FailingRollbackConn:
+        async def initialize(self, **kwargs: object) -> None:
+            del kwargs
+            raise RuntimeError("initialize failed")
+
+    class _FailingRollbackCM:
+        async def __aenter__(self):
+            return _FailingRollbackConn(), object()
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            del exc_type, exc, tb
+            raise RuntimeError("aexit cleanup failed")
+
+    def _spawn_stub():
+        def _factory(*args: object, **kwargs: object):
+            del args, kwargs
+            return _FailingRollbackCM()
+
+        return _factory
+
+    monkeypatch.setattr("nanobot.acp.session_runtime._acp_spawn_agent_process", _spawn_stub)
+    monkeypatch.setattr("nanobot.acp.session_runtime.logger.warning", _capture_warning)
+
+    with pytest.raises(RuntimeError, match="initialize failed"):
+        await dispatcher._ensure_connection()
+
+    assert dispatcher._conn is None
+    assert dispatcher._conn_cm is None
+    assert dispatcher._proc is None
+    assert dispatcher._session_map_bootstrapped is False
+    assert any("rollback __aexit__ failed" in item for item in warning_calls)
 
 
 @pytest.mark.asyncio
@@ -1076,6 +1148,82 @@ async def test_reactivate_once_when_connection_epoch_changes(tmp_path: Path) -> 
         dispatcher._session_activation_ensure_epoch["telegram:rebind"]
         == dispatcher._connection_epoch
     )
+
+
+@pytest.mark.asyncio
+async def test_activation_replays_desired_once_and_non_activation_prompt_does_not_replay(
+    tmp_path: Path,
+) -> None:
+    dispatcher = ACPDispatcher(
+        bus=MessageBus(),
+        workspace=tmp_path / "workspace-replay-desired",
+        acp_config=ACPBackendConfig(),
+    )
+    conn = _FakeConnWithActivation(existing_session_ids={"sid-replay"})
+    dispatcher._conn = conn
+    dispatcher._session_map = {"telegram:replay": "sid-replay"}
+    dispatcher._session_desired = {
+        "telegram:replay": {
+            "model": "anthropic/claude-sonnet-4",
+            "agent": "plan",
+        }
+    }
+
+    first = await dispatcher._ensure_session("telegram:replay")
+    second = await dispatcher._ensure_session("telegram:replay")
+
+    assert first == "sid-replay"
+    assert second == "sid-replay"
+    assert conn.resume_calls == ["sid-replay"]
+    # 中文注释：desired 只在激活成功时回放一次；同 epoch 下常规轮次不重复 set。
+    assert conn.model_calls == [("sid-replay", "anthropic/claude-sonnet-4")]
+    assert conn.mode_calls == [("sid-replay", "plan")]
+
+
+@pytest.mark.asyncio
+async def test_activation_replay_failure_skips_ensure_marker_and_retries_next_round(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    dispatcher = ACPDispatcher(
+        bus=MessageBus(),
+        workspace=tmp_path / "workspace-replay-fail",
+        acp_config=ACPBackendConfig(),
+    )
+    conn = _FakeConnWithActivationReplayFailureOnce(existing_session_ids={"sid-replay-fail"})
+    dispatcher._conn = conn
+    dispatcher._session_map = {"telegram:replay-fail": "sid-replay-fail"}
+    dispatcher._session_desired = {
+        "telegram:replay-fail": {
+            "model": "anthropic/claude-sonnet-4",
+        }
+    }
+
+    warning_calls: list[str] = []
+
+    def _capture_warning(message: str, *args: object, **kwargs: object) -> None:
+        del kwargs
+        warning_calls.append(message.format(*args))
+
+    monkeypatch.setattr("nanobot.acp.session_runtime.logger.warning", _capture_warning)
+
+    first = await dispatcher._ensure_session("telegram:replay-fail")
+
+    assert first == "sid-replay-fail"
+    assert "telegram:replay-fail" not in dispatcher._session_activation_ensure_epoch
+
+    second = await dispatcher._ensure_session("telegram:replay-fail")
+
+    assert second == "sid-replay-fail"
+    assert conn.resume_calls == ["sid-replay-fail", "sid-replay-fail"]
+    assert conn.model_calls == [
+        ("sid-replay-fail", "anthropic/claude-sonnet-4"),
+        ("sid-replay-fail", "anthropic/claude-sonnet-4"),
+    ]
+    assert dispatcher._session_activation_ensure_epoch["telegram:replay-fail"] == (
+        dispatcher._connection_epoch
+    )
+    assert any("desired replay failed" in item for item in warning_calls)
 
 
 @pytest.mark.asyncio

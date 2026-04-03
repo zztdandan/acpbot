@@ -16,6 +16,7 @@ class _DispatcherCommandPorts(Protocol):
     _HELP_TEXT: ClassVar[Any]
     _conn: Any
     _session_map: dict[str, str]
+    _session_desired: dict[str, dict[str, str]]
     _session_caps: dict[str, Any]
     _connection_epoch: int
     _session_activation_ensure_epoch: dict[str, int]

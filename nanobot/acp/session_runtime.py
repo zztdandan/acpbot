@@ -28,6 +28,7 @@ class _SessionRuntimePorts(Protocol):
     _session_map: dict[str, str]
     _session_locks: dict[str, asyncio.Lock]
     _session_caps: dict[str, _SessionCapabilities]
+    _session_desired: dict[str, dict[str, str]]
     _session_states: dict[str, _StreamState]
     _session_id_to_session_key: dict[str, str]
     _session_active_tool_name: dict[str, str]
@@ -104,7 +105,16 @@ async def _ensure_connection(runtime: _SessionRuntimePorts) -> None:
         except Exception:
             # 失败时完整回收连接上下文，避免半初始化残留。
             if runtime._conn_cm is not None:
-                await runtime._conn_cm.__aexit__(None, None, None)
+                try:
+                    await runtime._conn_cm.__aexit__(None, None, None)
+                except Exception as rollback_exc:
+                    logger.warning(
+                        "ACP ensure_connection rollback __aexit__ failed error_type={} error={}",
+                        type(rollback_exc).__name__,
+                        rollback_exc,
+                    )
+            # 中文注释：无论 rollback __aexit__ 是否异常，都必须回到干净状态，
+            # 避免半初始化句柄残留影响后续重连与会话引导。
             runtime._conn_cm = None
             runtime._conn = None
             runtime._proc = None
@@ -194,7 +204,11 @@ async def _activate_existing_session(
                 mcp_servers=mcp_servers,
             )
             _update_caps_from_session_payload(runtime._session_caps, session_id, response)
-            return True
+            return await _replay_desired_session_selection_on_activation(
+                runtime,
+                session_key=session_key,
+                session_id=session_id,
+            )
         except Exception as exc:
             resume_exc = exc
             logger.debug(
@@ -213,7 +227,11 @@ async def _activate_existing_session(
                 mcp_servers=mcp_servers,
             )
             _update_caps_from_session_payload(runtime._session_caps, session_id, response)
-            return True
+            return await _replay_desired_session_selection_on_activation(
+                runtime,
+                session_key=session_key,
+                session_id=session_id,
+            )
         except Exception as load_exc:
             logger.warning(
                 "ACP existing session activation failed session_key={} session_id={} resume_error_type={} resume_error={} load_error_type={} load_error={}",
@@ -234,6 +252,63 @@ async def _activate_existing_session(
         resume_exc if resume_exc is not None else "n/a",
     )
     return False
+
+
+async def _replay_desired_session_selection_on_activation(
+    runtime: _SessionRuntimePorts,
+    *,
+    session_key: str,
+    session_id: str,
+) -> bool:
+    """在 resume/load 成功后立即回放 session desired 的 model/agent。"""
+
+    desired = runtime._session_desired.get(session_key)
+    if not isinstance(desired, dict):
+        return True
+
+    desired_model = desired.get("model")
+    desired_agent = desired.get("agent")
+    model = desired_model if isinstance(desired_model, str) and desired_model else None
+    agent = desired_agent if isinstance(desired_agent, str) and desired_agent else None
+    if model is None and agent is None:
+        return True
+
+    if runtime._conn is None:
+        raise RuntimeError("ACP connection is not available")
+    set_session_model = cast(
+        Callable[..., Awaitable[Any]] | None,
+        getattr(runtime._conn, "set_session_model", None),
+    )
+    set_session_mode = cast(
+        Callable[..., Awaitable[Any]] | None,
+        getattr(runtime._conn, "set_session_mode", None),
+    )
+    caps = runtime._session_caps.setdefault(session_id, _SessionCapabilities())
+
+    try:
+        if model is not None:
+            if set_session_model is None:
+                raise RuntimeError("set_session_model is unavailable")
+            await set_session_model(model_id=model, session_id=session_id)
+            caps.current_model = model
+        if agent is not None:
+            if set_session_mode is None:
+                raise RuntimeError("set_session_mode is unavailable")
+            await set_session_mode(mode_id=agent, session_id=session_id)
+            caps.current_agent = agent
+        return True
+    except Exception as exc:
+        # 中文注释：desired 回放失败时不能写 ensured marker，确保后续轮次还能继续重试回放。
+        logger.warning(
+            "ACP desired replay failed session_key={} session_id={} desired_model={} desired_agent={} error_type={} error={}",
+            session_key,
+            session_id,
+            model,
+            agent,
+            type(exc).__name__,
+            exc,
+        )
+        return False
 
 
 async def _refresh_session_caps_from_server(
@@ -329,10 +404,10 @@ async def _ensure_session(
             ):
                 _mark_session_activation_ensured(runtime, session_key=session_key)
                 return session_id
-            runtime._session_map.pop(session_key, None)
-            runtime._session_caps.pop(session_id, None)
+            # 中文注释：激活/desired 回放失败时保留映射并跳过 ensured 标记，
+            # 让下一轮请求继续尝试激活回放，而不是立刻替换成新会话。
             runtime._session_activation_ensure_epoch.pop(session_key, None)
-            runtime._persist_session_map()
+            return session_id
 
         cwd = Path(runtime._resolved_acp_cwd())
         response = await runtime._conn.new_session(

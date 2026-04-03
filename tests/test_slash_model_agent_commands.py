@@ -157,6 +157,26 @@ class _EpochAwareSlashConn(_DummyACPConn):
         )
 
 
+class _ConcurrentSlashPromptConn(_DummyACPConn):
+    def __init__(self) -> None:
+        super().__init__()
+        self._release_model = asyncio.Event()
+        self.prompt_calls = 0
+
+    async def set_session_model(self, model_id: str, session_id: str):
+        self.model_calls.append((session_id, model_id))
+        await self._release_model.wait()
+        self.current_model = model_id
+        return SetSessionModelResponse()
+
+    async def prompt(self, prompt: list[object], session_id: str, **kwargs: object):
+        del prompt, session_id, kwargs
+        self.prompt_calls += 1
+
+    def release_model(self) -> None:
+        self._release_model.set()
+
+
 def _make_acp_dispatcher() -> tuple[ACPDispatcher, MessageBus, _DummyACPConn]:
     bus = MessageBus()
     conn = _DummyACPConn()
@@ -224,6 +244,54 @@ async def test_acp_set_model_and_set_agent_call_connection() -> None:
     out_agent = await bus.consume_outbound()
     assert out_agent.content == "Agent switched to: plan"
     assert conn.mode_calls == [("sess-1", "plan")]
+
+
+@pytest.mark.asyncio
+async def test_acp_set_model_success_updates_desired_and_persists() -> None:
+    dispatcher, bus, _ = _make_acp_dispatcher()
+    dispatcher._session_map["cli:chat"] = "sess-1"
+    persist_mock = MagicMock()
+    dispatcher._persist_session_map = persist_mock  # type: ignore[method-assign]
+
+    await dispatcher._dispatch(
+        InboundMessage(
+            channel="cli",
+            sender_id="user",
+            chat_id="chat",
+            content="/set_model anthropic/claude-sonnet-4",
+        )
+    )
+    out = await bus.consume_outbound()
+
+    assert out.content == "Model switched to: anthropic/claude-sonnet-4"
+    assert dispatcher._session_desired["cli:chat"]["model"] == "anthropic/claude-sonnet-4"
+    persist_mock.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_acp_set_agent_success_updates_desired_and_persists() -> None:
+    dispatcher, bus, _ = _make_acp_dispatcher()
+    dispatcher._session_map["cli:chat"] = "sess-1"
+    dispatcher._session_desired["cli:chat"] = {"model": "opencode/big-pickle"}
+    persist_mock = MagicMock()
+    dispatcher._persist_session_map = persist_mock  # type: ignore[method-assign]
+
+    await dispatcher._dispatch(
+        InboundMessage(
+            channel="cli",
+            sender_id="user",
+            chat_id="chat",
+            content="/set_agent plan",
+        )
+    )
+    out = await bus.consume_outbound()
+
+    assert out.content == "Agent switched to: plan"
+    assert dispatcher._session_desired["cli:chat"] == {
+        "model": "opencode/big-pickle",
+        "agent": "plan",
+    }
+    persist_mock.assert_called_once_with()
 
 
 @pytest.mark.asyncio
@@ -418,3 +486,64 @@ async def test_slash_commands_activation_once_per_epoch_then_reactivate_after_ep
     _ = await bus.consume_outbound()
 
     assert conn.resume_calls == ["sess-1", "sess-1"]
+
+
+@pytest.mark.asyncio
+async def test_same_session_concurrent_set_model_and_prompt_are_serialized() -> None:
+    bus = MessageBus()
+    conn = _ConcurrentSlashPromptConn()
+    dispatcher = ACPDispatcher(
+        bus=bus,
+        workspace=Path("/tmp"),
+        acp_config=ACPBackendConfig(),
+    )
+    dispatcher._conn = cast(Any, conn)
+    dispatcher._session_map = {"cli:chat": "sess-1"}
+
+    caps = _SessionCapabilities()
+    caps.available_models = ["opencode/big-pickle", "anthropic/claude-sonnet-4"]
+    caps.current_model = "opencode/big-pickle"
+    dispatcher._session_caps["sess-1"] = caps
+
+    async def _ensure_session(session_key: str) -> str:
+        _ = session_key
+        return "sess-1"
+
+    dispatcher._ensure_session = _ensure_session  # type: ignore[method-assign]
+
+    set_task = asyncio.create_task(
+        dispatcher._dispatch(
+            InboundMessage(
+                channel="cli",
+                sender_id="user",
+                chat_id="chat",
+                content="/set_model anthropic/claude-sonnet-4",
+            )
+        )
+    )
+    await asyncio.sleep(0.02)
+
+    prompt_task = asyncio.create_task(
+        dispatcher._dispatch(
+            InboundMessage(
+                channel="cli",
+                sender_id="user",
+                chat_id="chat",
+                content="hello",
+            )
+        )
+    )
+    await asyncio.sleep(0.02)
+
+    # 中文注释：若同 session_key 未串行，普通 prompt 会在 set_model 完成前抢跑，导致状态覆盖风险。
+    assert conn.prompt_calls == 0
+
+    conn.release_model()
+    await set_task
+    await prompt_task
+
+    out1 = await bus.consume_outbound()
+    out2 = await bus.consume_outbound()
+    assert out1.content == "Model switched to: anthropic/claude-sonnet-4"
+    assert out2.content == "<final></final>"
+    assert conn.prompt_calls == 1

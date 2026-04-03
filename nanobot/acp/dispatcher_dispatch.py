@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Awaitable, Protocol
+from typing import Any, Awaitable, Protocol, cast
 
 from loguru import logger
 
@@ -82,38 +82,40 @@ async def _dispatch_inbound(dispatcher: _DispatcherFlowPorts, msg: InboundMessag
             key = origin
 
         await dispatcher._audit_inbound(msg=msg, session_key=key)
-        command, arg = dispatcher._parse_command(msg.content)
-        # 中文注释：slash 命令分支保持独立模块，主流程函数仅负责编排。
-        if await _handle_slash_command(
-            dispatcher,
-            msg=msg,
-            session_key=key,
-            command=command,
-            arg=arg,
-        ):
-            return
 
-        if msg.channel not in {"cli", "system"} and msg.chat_id:
-            # 记录最近一次真实渠道目标，供其它功能选路时参考。
-            dispatcher.last_target = (msg.channel, msg.chat_id)
-
-        content_esc = msg.content.encode("unicode_escape", "ignore").decode("ascii")
-        if len(content_esc) > 320:
-            content_esc = f"{content_esc[:320]}..."
-        logger.debug(
-            "ACP dispatch inbound channel={} sender={} chat={} session_key={} chars={} metadata_keys={} content_esc='{}'",
-            msg.channel,
-            msg.sender_id,
-            msg.chat_id,
-            key,
-            len(msg.content),
-            sorted((msg.metadata or {}).keys()),
-            content_esc,
-        )
-
-        # 每个会话串行执行，避免同一会话并发 prompt 互相覆盖状态。
+        # 中文注释：同一 session_key 下，slash 与常规 prompt 共用一把锁串行，
+        # 防止 /new、/set_* 与普通对话并发时发生状态覆盖或脏写。
         lock = dispatcher._process_locks.setdefault(key, asyncio.Lock())
         async with lock:
+            command, arg = dispatcher._parse_command(msg.content)
+            # 中文注释：slash 命令分支保持独立模块，主流程函数仅负责编排。
+            if await _handle_slash_command(
+                cast(Any, dispatcher),
+                msg=msg,
+                session_key=key,
+                command=command,
+                arg=arg,
+            ):
+                return
+
+            if msg.channel not in {"cli", "system"} and msg.chat_id:
+                # 记录最近一次真实渠道目标，供其它功能选路时参考。
+                dispatcher.last_target = (msg.channel, msg.chat_id)
+
+            content_esc = msg.content.encode("unicode_escape", "ignore").decode("ascii")
+            if len(content_esc) > 320:
+                content_esc = f"{content_esc[:320]}..."
+            logger.debug(
+                "ACP dispatch inbound channel={} sender={} chat={} session_key={} chars={} metadata_keys={} content_esc='{}'",
+                msg.channel,
+                msg.sender_id,
+                msg.chat_id,
+                key,
+                len(msg.content),
+                sorted((msg.metadata or {}).keys()),
+                content_esc,
+            )
+
             metadata = msg.metadata or {}
             progress_meta = dispatcher._sanitize_outbound_metadata(metadata)
             progress_meta["_progress"] = True
