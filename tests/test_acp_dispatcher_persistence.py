@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -71,6 +73,55 @@ class _FakeConnListAuthoritativeEmpty:
     async def list_sessions(self, cwd: str | None = None):
         del cwd
         return {"sessions": []}
+
+
+class _FakeConnWithActivation(_FakeConn):
+    def __init__(self, existing_session_ids: set[str] | None = None) -> None:
+        super().__init__(existing_session_ids=existing_session_ids)
+        self.resume_calls: list[str] = []
+
+    async def resume_session(self, cwd: str, session_id: str, mcp_servers: list[object]):
+        del cwd, mcp_servers
+        self.resume_calls.append(session_id)
+        return SimpleNamespace(
+            models=SimpleNamespace(
+                current_model_id="opencode/big-pickle",
+                available_models=[SimpleNamespace(model_id="opencode/big-pickle")],
+            ),
+            modes=SimpleNamespace(
+                current_mode_id="build",
+                available_modes=[SimpleNamespace(id="build")],
+            ),
+        )
+
+
+class _FakeConnInvalidParamsRebind(_FakeConnWithActivation):
+    def __init__(self, existing_session_ids: set[str] | None = None) -> None:
+        super().__init__(existing_session_ids=existing_session_ids)
+        self._prompt_calls = 0
+
+    async def prompt(self, prompt: list[object], session_id: str, **kwargs: object):
+        del prompt, kwargs
+        self._prompt_calls += 1
+        if self._prompt_calls == 1:
+            # 中文注释：模拟 ACP 端“旧会话参数失效”，触发 invalid params 自愈分支。
+            raise RuntimeError("invalid params")
+        self.prompt_session_ids.append(session_id)
+
+
+class _FakeConnAlwaysClosed(_FakeConnWithActivation):
+    async def prompt(self, prompt: list[object], session_id: str, **kwargs: object):
+        del prompt, session_id, kwargs
+        raise ConnectionError("connection closed")
+
+
+class _FakeConnContextManager:
+    def __init__(self) -> None:
+        self.exit_calls = 0
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        del exc_type, exc, tb
+        self.exit_calls += 1
 
 
 def _map_file(root: Path) -> Path:
@@ -979,3 +1030,208 @@ def test_session_map_activation_epoch_is_runtime_only_not_persisted(
         }
     ]
     assert "activationEnsureEpoch" not in mappings[0]
+
+
+@pytest.mark.asyncio
+async def test_activate_once_per_epoch_for_same_session_key(tmp_path: Path) -> None:
+    dispatcher = ACPDispatcher(
+        bus=MessageBus(),
+        workspace=tmp_path / "workspace-activate-once",
+        acp_config=ACPBackendConfig(),
+    )
+    conn = _FakeConnWithActivation(existing_session_ids={"sid-once"})
+    dispatcher._conn = conn
+    dispatcher._session_map = {"telegram:activate-once": "sid-once"}
+
+    first_session_id = await dispatcher._ensure_session("telegram:activate-once")
+    second_session_id = await dispatcher._ensure_session("telegram:activate-once")
+
+    assert first_session_id == "sid-once"
+    assert second_session_id == "sid-once"
+    assert conn.resume_calls == ["sid-once"]
+    assert (
+        dispatcher._session_activation_ensure_epoch["telegram:activate-once"]
+        == dispatcher._connection_epoch
+    )
+
+
+@pytest.mark.asyncio
+async def test_reactivate_once_when_connection_epoch_changes(tmp_path: Path) -> None:
+    dispatcher = ACPDispatcher(
+        bus=MessageBus(),
+        workspace=tmp_path / "workspace-reactivate",
+        acp_config=ACPBackendConfig(),
+    )
+    conn = _FakeConnWithActivation(existing_session_ids={"sid-rebind"})
+    dispatcher._conn = conn
+    dispatcher._session_map = {"telegram:rebind": "sid-rebind"}
+
+    _ = await dispatcher._ensure_session("telegram:rebind")
+    # 中文注释：模拟连接重建后进入新 epoch，同一 session_key 允许再次 activate 一次。
+    dispatcher._connection_epoch += 1
+    _ = await dispatcher._ensure_session("telegram:rebind")
+
+    assert conn.resume_calls == ["sid-rebind", "sid-rebind"]
+    assert (
+        dispatcher._session_activation_ensure_epoch["telegram:rebind"]
+        == dispatcher._connection_epoch
+    )
+
+
+@pytest.mark.asyncio
+async def test_ensure_marker_not_written_when_ensure_connection_fails_then_retry(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    dispatcher = ACPDispatcher(
+        bus=MessageBus(),
+        workspace=tmp_path / "workspace-ensure-fail",
+        acp_config=ACPBackendConfig(),
+    )
+    conn = _FakeConnWithActivation(existing_session_ids={"sid-ensure-fail"})
+    dispatcher._conn = conn
+    dispatcher._session_map = {"telegram:ensure-fail": "sid-ensure-fail"}
+
+    attempts = {"count": 0}
+
+    async def _flaky_ensure_connection(runtime: object) -> None:
+        del runtime
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise RuntimeError("temporary ensure failure")
+
+    monkeypatch.setattr("nanobot.acp.session_runtime._ensure_connection", _flaky_ensure_connection)
+
+    with pytest.raises(RuntimeError, match="temporary ensure failure"):
+        await dispatcher._ensure_session("telegram:ensure-fail")
+
+    assert "telegram:ensure-fail" not in dispatcher._session_activation_ensure_epoch
+
+    recovered_session_id = await dispatcher._ensure_session("telegram:ensure-fail")
+    assert recovered_session_id == "sid-ensure-fail"
+    assert conn.resume_calls == ["sid-ensure-fail"]
+    assert (
+        dispatcher._session_activation_ensure_epoch["telegram:ensure-fail"]
+        == dispatcher._connection_epoch
+    )
+
+
+@pytest.mark.asyncio
+async def test_invalid_params_rebind_keeps_activate_marker_semantics(tmp_path: Path) -> None:
+    dispatcher = ACPDispatcher(
+        bus=MessageBus(),
+        workspace=tmp_path / "workspace-invalid-params-rebind",
+        acp_config=ACPBackendConfig(),
+    )
+    conn = _FakeConnInvalidParamsRebind(existing_session_ids={"sid-stale"})
+    dispatcher._conn = conn
+    dispatcher._session_map = {"telegram:invalid-params-rebind": "sid-stale"}
+
+    # 中文注释：避免依赖 ACP block 工厂，测试聚焦在 rebind + ensure 行为。
+    dispatcher._build_inbound_prompt_blocks = lambda *args, **kwargs: [object()]  # type: ignore[method-assign]
+
+    result = await dispatcher.process_direct(
+        "hello",
+        session_key="telegram:invalid-params-rebind",
+        channel="telegram",
+        chat_id="chat-rebind",
+    )
+
+    assert result == ""
+    assert conn.resume_calls == ["sid-stale"]
+    rebound_session_id = dispatcher._session_map["telegram:invalid-params-rebind"]
+    assert rebound_session_id != "sid-stale"
+    assert (
+        dispatcher._session_activation_ensure_epoch["telegram:invalid-params-rebind"]
+        == dispatcher._connection_epoch
+    )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_ensure_same_key_activates_once_per_epoch(tmp_path: Path) -> None:
+    dispatcher = ACPDispatcher(
+        bus=MessageBus(),
+        workspace=tmp_path / "workspace-concurrent-ensure",
+        acp_config=ACPBackendConfig(),
+    )
+    conn = _FakeConnWithActivation(existing_session_ids={"sid-concurrent"})
+    dispatcher._conn = conn
+    dispatcher._session_map = {"telegram:concurrent": "sid-concurrent"}
+
+    async def _noop_ensure_connection(runtime: Any) -> None:
+        del runtime
+
+    activation_calls = {"count": 0}
+
+    async def _slow_activate(runtime: Any, *, session_key: str, session_id: str) -> bool:
+        del runtime, session_key
+        activation_calls["count"] += 1
+        await asyncio.sleep(0.02)
+        conn.resume_calls.append(session_id)
+        return True
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr("nanobot.acp.session_runtime._ensure_connection", _noop_ensure_connection)
+    monkeypatch.setattr("nanobot.acp.session_runtime._activate_existing_session", _slow_activate)
+
+    first, second = await asyncio.gather(
+        dispatcher._ensure_session("telegram:concurrent"),
+        dispatcher._ensure_session("telegram:concurrent"),
+    )
+
+    monkeypatch.undo()
+
+    assert first == "sid-concurrent"
+    assert second == "sid-concurrent"
+    assert activation_calls["count"] == 1
+    assert conn.resume_calls == ["sid-concurrent"]
+
+
+@pytest.mark.asyncio
+async def test_connection_closed_rebind_resets_state_and_rebuilds_once(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    dispatcher = ACPDispatcher(
+        bus=MessageBus(),
+        workspace=tmp_path / "workspace-reconnect-once",
+        acp_config=ACPBackendConfig(),
+    )
+    old_conn = _FakeConnAlwaysClosed(existing_session_ids={"sid-reconnect"})
+    old_cm = _FakeConnContextManager()
+    new_conn = _FakeConnWithActivation(existing_session_ids={"sid-reconnect"})
+    new_cm = _FakeConnContextManager()
+
+    dispatcher._conn = old_conn
+    dispatcher._conn_cm = old_cm
+    dispatcher._proc = object()
+    dispatcher._session_map_bootstrapped = True
+    dispatcher._session_map = {"telegram:reconnect": "sid-reconnect"}
+
+    rebuilds = {"count": 0}
+
+    async def _reconnect_once(runtime: Any) -> None:
+        if runtime._conn is not None:
+            return
+        # 中文注释：连接关闭自愈后，重建前必须已经清空 bootstrap 标志，防止旧连接状态泄漏。
+        assert runtime._session_map_bootstrapped is False
+        rebuilds["count"] += 1
+        runtime._conn = new_conn
+        runtime._conn_cm = new_cm
+        runtime._proc = object()
+        runtime._connection_epoch += 1
+
+    monkeypatch.setattr("nanobot.acp.session_runtime._ensure_connection", _reconnect_once)
+    dispatcher._build_inbound_prompt_blocks = lambda *args, **kwargs: [object()]  # type: ignore[method-assign]
+
+    result = await dispatcher.process_direct(
+        "hello",
+        session_key="telegram:reconnect",
+        channel="telegram",
+        chat_id="chat-reconnect",
+    )
+
+    assert result == ""
+    assert old_cm.exit_calls == 1
+    assert rebuilds["count"] == 1
+    assert dispatcher._conn is new_conn

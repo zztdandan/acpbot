@@ -35,6 +35,7 @@ from nanobot.acp.session_runtime import (
     _activate_existing_session,
     _ensure_connection,
     _ensure_session,
+    _refresh_session_caps_from_server,
     _process_direct_impl,
 )
 from nanobot.acp.session_runtime_mcp import _convert_mcp_servers
@@ -66,6 +67,8 @@ class ACPDispatcher(_ACPFileTransportMixin, _SessionMapSupport, _ACPObservabilit
     _session_active_tool_name: dict[str, str]
     _session_result_media: dict[str, list[str]]
     _session_pending_media: dict[str, list[str]]
+    _connection_epoch: int
+    _session_activation_ensure_epoch: dict[str, int]
 
     # ACP 模式下可用的 slash 命令帮助文本。
     _HELP_TEXT: ClassVar[str] = (
@@ -116,7 +119,13 @@ class ACPDispatcher(_ACPFileTransportMixin, _SessionMapSupport, _ACPObservabilit
         self._session_active_tool_name: dict[str, str]
         self._session_result_media: dict[str, list[str]]
         self._session_pending_media: dict[str, list[str]]
+        self._connection_epoch: int
+        self._session_activation_ensure_epoch: dict[str, int]
         _init_dispatcher_state(self)
+        # 中文注释：connection epoch 用于标记“当前稳定连接周期”，重连后递增，驱动会话重激活一次。
+        self._connection_epoch = 0
+        # 中文注释：记录 session_key 最近一次完成 ensure/activate 的 epoch，实现同一连接周期内去重。
+        self._session_activation_ensure_epoch = {}
         # 中文注释：审计文件状态由可观测性 mixin 统一维护，避免主调度器继续膨胀。
         self._init_observability_state()
 
@@ -273,6 +282,10 @@ class ACPDispatcher(_ACPFileTransportMixin, _SessionMapSupport, _ACPObservabilit
             session_key=session_key,
             session_id=session_id,
         )
+
+    async def _refresh_session_caps_from_server(self, session_id: str) -> bool:
+        """主动从 ACP 拉取 session 能力状态，刷新模型/agent 缓存。"""
+        return await _refresh_session_caps_from_server(self, session_id=session_id)
 
     def _convert_mcp_servers(self) -> list[Any]:
         """把 nanobot MCP 配置转换为 ACP schema。"""

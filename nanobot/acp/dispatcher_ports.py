@@ -17,6 +17,8 @@ class _DispatcherCommandPorts(Protocol):
     _conn: Any
     _session_map: dict[str, str]
     _session_caps: dict[str, Any]
+    _connection_epoch: int
+    _session_activation_ensure_epoch: dict[str, int]
 
     async def _ensure_connection(self) -> None: ...
 
@@ -30,6 +32,8 @@ class _DispatcherCommandPorts(Protocol):
     async def _list_models_command(self, session_id: str) -> str: ...
 
     async def _list_agents_command(self, session_id: str) -> str: ...
+
+    async def _refresh_session_caps_from_server(self, session_id: str) -> bool: ...
 
     def _persist_session_map(self) -> None: ...
 
