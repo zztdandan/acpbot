@@ -17,6 +17,8 @@ class _SessionMapStorageMixin:
 
     _conn: Any = None
     _session_map: dict[str, str] = {}
+    _session_desired: dict[str, dict[str, str]] = {}
+    _session_activation_ensure_epoch: dict[str, int] = {}
     _session_map_file: Path = Path()
     _session_map_bootstrapped: bool = False
     _session_caps: dict[str, _SessionCapabilities] = {}
@@ -43,13 +45,47 @@ class _SessionMapStorageMixin:
         cwd: str,
         nanobot_side_session_key: str,
         acp_side_session_id: str,
+        desired_model: str | None = None,
+        desired_agent: str | None = None,
     ) -> dict[str, str]:
         """统一持久化 entry 的字段结构。"""
-        return {
+        entry = {
             "cwd": cwd,
             "nanobotSideSessionKey": nanobot_side_session_key,
             "acpSideSessionId": acp_side_session_id,
         }
+        # 中文注释：desired* 是可选扩展字段；缺省不写入，确保旧格式读取/对比稳定。
+        if isinstance(desired_model, str) and desired_model:
+            entry["desiredModel"] = desired_model
+        if isinstance(desired_agent, str) and desired_agent:
+            entry["desiredAgent"] = desired_agent
+        return entry
+
+    def _resolve_desired_for_session(
+        self,
+        *,
+        nanobot_side_session_key: str,
+        acp_side_session_id: str,
+    ) -> tuple[str | None, str | None]:
+        """优先使用 session_key 的 desired，缺失时回落到 session capabilities。"""
+        desired = self._session_desired.get(nanobot_side_session_key)
+        if isinstance(desired, dict):
+            desired_model = desired.get("model")
+            desired_agent = desired.get("agent")
+            model = desired_model if isinstance(desired_model, str) and desired_model else None
+            agent = desired_agent if isinstance(desired_agent, str) and desired_agent else None
+            if model or agent:
+                return model, agent
+
+        caps = self._session_caps.get(acp_side_session_id)
+        if caps is None:
+            return None, None
+        desired_model = caps.current_model if isinstance(caps.current_model, str) else None
+        desired_agent = caps.current_agent if isinstance(caps.current_agent, str) else None
+        return (
+            desired_model if desired_model else None,
+            desired_agent if desired_agent else None,
+        )
 
     def _load_session_map_from_disk(self) -> dict[str, str]:
         """只加载当前 cwd 的映射，避免不同实例互相污染。"""
@@ -65,10 +101,24 @@ class _SessionMapStorageMixin:
         except Exception:
             logger.exception("ACP session map load failed: {}", self._session_map_file)
             return {}
+        if not isinstance(payload, dict):
+            # 中文注释：兼容历史脏数据/人工误写（如顶层数组）；
+            # 此时按空映射处理，避免启动阶段因结构异常直接崩溃。
+            self._session_desired = {}
+            logger.warning(
+                "ACP session map load skipped: malformed top-level payload path={} payload_type={}",
+                self._session_map_file,
+                type(payload).__name__,
+            )
+            return {}
 
         current_cwd = self._resolved_acp_cwd()
         loaded: dict[str, str] = {}
-        for raw in payload.get("mappings", []):
+        loaded_desired: dict[str, dict[str, str]] = {}
+        mappings_payload = payload.get("mappings", [])
+        if not isinstance(mappings_payload, list):
+            mappings_payload = []
+        for raw in mappings_payload:
             if not isinstance(raw, dict):
                 continue
             if raw.get("cwd") != current_cwd:
@@ -78,12 +128,31 @@ class _SessionMapStorageMixin:
             if isinstance(nanobot_side_session_key, str) and isinstance(acp_side_session_id, str):
                 if nanobot_side_session_key and acp_side_session_id:
                     loaded[nanobot_side_session_key] = acp_side_session_id
+                    desired_model = raw.get("desiredModel")
+                    desired_agent = raw.get("desiredAgent")
+                    normalized_desired: dict[str, str] = {}
+                    if isinstance(desired_model, str) and desired_model:
+                        normalized_desired["model"] = desired_model
+                    if isinstance(desired_agent, str) and desired_agent:
+                        normalized_desired["agent"] = desired_agent
+                    if normalized_desired:
+                        loaded_desired[nanobot_side_session_key] = normalized_desired
+                        # 中文注释：从磁盘恢复 desired，保证进程重启后首轮 prompt 仍可携带期望模型/agent。
+                        caps = self._session_caps.setdefault(
+                            acp_side_session_id, _SessionCapabilities()
+                        )
+                        if "model" in normalized_desired:
+                            caps.current_model = normalized_desired["model"]
+                        if "agent" in normalized_desired:
+                            caps.current_agent = normalized_desired["agent"]
+        self._session_desired = loaded_desired
         logger.debug(
-            "ACP session map loaded path={} cwd={} loaded={} total_entries={}",
+            "ACP session map loaded path={} cwd={} loaded={} desired_loaded={} total_entries={}",
             self._session_map_file,
             current_cwd,
             len(loaded),
-            len(payload.get("mappings", [])) if isinstance(payload, dict) else 0,
+            len(loaded_desired),
+            len(mappings_payload),
         )
         return loaded
 
@@ -110,14 +179,22 @@ class _SessionMapStorageMixin:
                     "ACP session map read-before-write failed: {}", self._session_map_file
                 )
 
-        mappings = preserved + [
-            self._session_map_entry(
-                cwd=current_cwd,
+        current_cwd_entries: list[dict[str, str]] = []
+        for nanobot_side_session_key, acp_side_session_id in sorted(self._session_map.items()):
+            desired_model, desired_agent = self._resolve_desired_for_session(
                 nanobot_side_session_key=nanobot_side_session_key,
                 acp_side_session_id=acp_side_session_id,
             )
-            for nanobot_side_session_key, acp_side_session_id in sorted(self._session_map.items())
-        ]
+            current_cwd_entries.append(
+                self._session_map_entry(
+                    cwd=current_cwd,
+                    nanobot_side_session_key=nanobot_side_session_key,
+                    acp_side_session_id=acp_side_session_id,
+                    desired_model=desired_model,
+                    desired_agent=desired_agent,
+                )
+            )
+        mappings = preserved + current_cwd_entries
         # 中文注释：持久化采用 version 包裹，便于后续结构升级。
         data = {"version": 1, "mappings": mappings}
         self._session_map_file.parent.mkdir(parents=True, exist_ok=True)

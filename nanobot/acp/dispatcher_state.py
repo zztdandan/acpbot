@@ -19,6 +19,10 @@ def _init_dispatcher_state(dispatcher: Any) -> None:
     dispatcher._process_locks = {}
     dispatcher._session_states = {}
     dispatcher._session_caps = {}
+    # 中文注释：session_key 级别记录期望模型/agent，用于重启后 session map 回放。
+    dispatcher._session_desired = {}
+    # 中文注释：activation ensure 轮次标记仅用于运行时去抖，不参与磁盘持久化。
+    dispatcher._session_activation_ensure_epoch = {}
     dispatcher._active_tasks = {}
     dispatcher.last_target = None
     # 中文注释：通过 dispatcher 兼容导出层读取 get_data_dir，保持历史 monkeypatch 注入点不变。

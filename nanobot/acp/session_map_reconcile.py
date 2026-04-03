@@ -12,6 +12,7 @@ class _SessionMapReconcileMixin:
 
     _conn: Any
     _session_map: dict[str, str]
+    _session_desired: dict[str, dict[str, str]]
     _session_map_bootstrapped: bool
     _session_caps: dict[str, Any]
 
@@ -257,6 +258,8 @@ class _SessionMapReconcileMixin:
             stale_session_id = self._session_map.pop(nanobot_side_session_key, None)
             if stale_session_id:
                 self._session_caps.pop(stale_session_id, None)
+            # 中文注释：映射被对账删除时，同步清理 session_key 级 desired，避免脏数据被下次持久化带回。
+            self._session_desired.pop(nanobot_side_session_key, None)
         if to_delete:
             logger.info(
                 "ACP session reconciliation removed stale mappings count={} remaining={}",

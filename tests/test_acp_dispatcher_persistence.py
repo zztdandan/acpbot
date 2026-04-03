@@ -36,7 +36,8 @@ class _FakeConn:
             "sessions": [{"sessionId": sid} for sid in sorted(self._existing_session_ids)],
         }
 
-    async def prompt(self, prompt: list[object], session_id: str):
+    async def prompt(self, prompt: list[object], session_id: str, **kwargs: object):
+        del kwargs
         self.prompt_session_ids.append(session_id)
         self.prompt_payloads.append(prompt)
 
@@ -755,4 +756,226 @@ def test_dispatcher_initializes_runtime_state_maps(monkeypatch, tmp_path: Path) 
     assert dispatcher._session_active_tool_name == {}
     assert dispatcher._session_result_media == {}
     assert dispatcher._session_pending_media == {}
+    assert dispatcher._session_desired == {}
+    assert dispatcher._session_activation_ensure_epoch == {}
     assert dispatcher._session_map_file == config_root / "acp-session-map.json"
+
+
+@pytest.mark.asyncio
+async def test_session_map_desired_roundtrip_persistence(monkeypatch, tmp_path: Path) -> None:
+    config_root = tmp_path / ".nanobot" / "config"
+    monkeypatch.setattr("nanobot.acp.dispatcher.get_data_dir", lambda: config_root)
+
+    workspace = tmp_path / "workspace-desired"
+    dispatcher = ACPDispatcher(
+        bus=MessageBus(),
+        workspace=workspace,
+        acp_config=ACPBackendConfig(),
+    )
+    conn = _FakeConn()
+    dispatcher._conn = conn
+    dispatcher._convert_mcp_servers = lambda: []
+
+    async def _noop() -> None:
+        return None
+
+    dispatcher._ensure_connection = _noop
+    created_session_id = await dispatcher._ensure_session(
+        "telegram:desired",
+        preferred_model="anthropic/claude-sonnet-4",
+        preferred_agent="plan",
+    )
+
+    mappings = _read_mappings(_map_file(config_root))
+    assert mappings == [
+        {
+            "cwd": str(workspace.resolve()),
+            "nanobotSideSessionKey": "telegram:desired",
+            "acpSideSessionId": created_session_id,
+            "desiredModel": "anthropic/claude-sonnet-4",
+            "desiredAgent": "plan",
+        }
+    ]
+
+    reloaded = ACPDispatcher(
+        bus=MessageBus(),
+        workspace=workspace,
+        acp_config=ACPBackendConfig(),
+    )
+    reloaded._conn = _FakeConn(existing_session_ids={created_session_id})
+    await reloaded._bootstrap_session_map()
+
+    assert reloaded._session_map == {"telegram:desired": created_session_id}
+    assert reloaded._session_desired == {
+        "telegram:desired": {
+            "model": "anthropic/claude-sonnet-4",
+            "agent": "plan",
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_session_map_legacy_format_loads_without_desired_fields(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config_root = tmp_path / ".nanobot" / "config"
+    config_root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("nanobot.acp.dispatcher.get_data_dir", lambda: config_root)
+
+    workspace = tmp_path / "workspace-legacy"
+    cwd_value = str(workspace.resolve())
+    _map_file(config_root).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "mappings": [
+                    {
+                        "cwd": cwd_value,
+                        "nanobotSideSessionKey": "telegram:legacy",
+                        "acpSideSessionId": "legacy-sid",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    dispatcher = ACPDispatcher(
+        bus=MessageBus(),
+        workspace=workspace,
+        acp_config=ACPBackendConfig(),
+    )
+    dispatcher._conn = _FakeConn(existing_session_ids={"legacy-sid"})
+
+    await dispatcher._bootstrap_session_map()
+
+    assert dispatcher._session_map == {"telegram:legacy": "legacy-sid"}
+    assert dispatcher._session_desired == {}
+
+
+@pytest.mark.asyncio
+async def test_session_map_malformed_top_level_list_is_ignored(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config_root = tmp_path / ".nanobot" / "config"
+    config_root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("nanobot.acp.dispatcher.get_data_dir", lambda: config_root)
+
+    map_path = _map_file(config_root)
+    map_path.write_text("[]", encoding="utf-8")
+
+    dispatcher = ACPDispatcher(
+        bus=MessageBus(),
+        workspace=tmp_path / "workspace-malformed",
+        acp_config=ACPBackendConfig(),
+    )
+
+    await dispatcher._bootstrap_session_map()
+
+    assert dispatcher._session_map == {}
+    assert dispatcher._session_desired == {}
+
+
+@pytest.mark.asyncio
+async def test_session_map_cwd_isolation_preserves_other_cwd_desired_fields(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config_root = tmp_path / ".nanobot" / "config"
+    config_root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("nanobot.acp.dispatcher.get_data_dir", lambda: config_root)
+
+    workspace_current = tmp_path / "workspace-cwd-current"
+    workspace_other = tmp_path / "workspace-cwd-other"
+    cwd_current = str(workspace_current.resolve())
+    cwd_other = str(workspace_other.resolve())
+    _map_file(config_root).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "mappings": [
+                    {
+                        "cwd": cwd_current,
+                        "nanobotSideSessionKey": "telegram:current",
+                        "acpSideSessionId": "sid-current",
+                        "desiredModel": "model-current",
+                        "desiredAgent": "agent-current",
+                    },
+                    {
+                        "cwd": cwd_other,
+                        "nanobotSideSessionKey": "telegram:other",
+                        "acpSideSessionId": "sid-other",
+                        "desiredModel": "model-other",
+                        "desiredAgent": "agent-other",
+                    },
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    dispatcher = ACPDispatcher(
+        bus=MessageBus(),
+        workspace=workspace_current,
+        acp_config=ACPBackendConfig(),
+    )
+    dispatcher._conn = _FakeConn(existing_session_ids={"sid-current"})
+
+    await dispatcher._bootstrap_session_map()
+
+    mappings = _read_mappings(_map_file(config_root))
+    assert mappings == [
+        {
+            "cwd": cwd_other,
+            "nanobotSideSessionKey": "telegram:other",
+            "acpSideSessionId": "sid-other",
+            "desiredModel": "model-other",
+            "desiredAgent": "agent-other",
+        },
+        {
+            "cwd": cwd_current,
+            "nanobotSideSessionKey": "telegram:current",
+            "acpSideSessionId": "sid-current",
+            "desiredModel": "model-current",
+            "desiredAgent": "agent-current",
+        },
+    ]
+
+
+def test_session_map_activation_epoch_is_runtime_only_not_persisted(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config_root = tmp_path / ".nanobot" / "config"
+    monkeypatch.setattr("nanobot.acp.dispatcher.get_data_dir", lambda: config_root)
+
+    dispatcher = ACPDispatcher(
+        bus=MessageBus(),
+        workspace=tmp_path / "workspace-epoch",
+        acp_config=ACPBackendConfig(),
+    )
+    dispatcher._session_map = {"telegram:epoch": "sid-epoch"}
+    dispatcher._session_desired = {
+        "telegram:epoch": {"model": "model-epoch", "agent": "agent-epoch"}
+    }
+    dispatcher._session_activation_ensure_epoch = {"telegram:epoch": 42}
+
+    dispatcher._persist_session_map()
+
+    mappings = _read_mappings(_map_file(config_root))
+    assert mappings == [
+        {
+            "cwd": str((tmp_path / "workspace-epoch").resolve()),
+            "nanobotSideSessionKey": "telegram:epoch",
+            "acpSideSessionId": "sid-epoch",
+            "desiredModel": "model-epoch",
+            "desiredAgent": "agent-epoch",
+        }
+    ]
+    assert "activationEnsureEpoch" not in mappings[0]
