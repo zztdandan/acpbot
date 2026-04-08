@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 from loguru import logger
 
@@ -17,7 +18,19 @@ def _make_dispatcher(tmp_path: Path, *, inbound_media_dir: str | None = None) ->
     config = ACPBackendConfig()
     if inbound_media_dir is not None:
         config.inbound_media_dir = inbound_media_dir
-    return ACPDispatcher(bus=MessageBus(), workspace=workspace, acp_config=config)
+    dispatcher = ACPDispatcher(bus=MessageBus(), workspace=workspace, acp_config=config)
+    # 中文注释：该单测只验证 media 规范化契约，不依赖外部 acp SDK 包。
+    dispatcher._acp_text_block = lambda content: SimpleNamespace(type="text", text=content)  # type: ignore[method-assign]  # noqa: SLF001
+    dispatcher._acp_resource_link_block = (  # type: ignore[method-assign]  # noqa: SLF001
+        lambda name, uri, *, mime_type=None, size=None: SimpleNamespace(
+            type="resource_link",
+            name=name,
+            uri=uri,
+            mime_type=mime_type,
+            size=size,
+        )
+    )
+    return dispatcher
 
 
 def _block_types(blocks: list[object]) -> list[str]:
