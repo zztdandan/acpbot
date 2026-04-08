@@ -77,7 +77,13 @@ async def test_e2e_ws_004_gateway_request_project_tree_gets_final() -> None:
                     }
                 )
             )
+            # 中文注释：等待服务端确认 authed，避免 auth 尚未完成就发送业务帧被网关拒绝。
+            authed_frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=5.0))
+            assert authed_frame.get("type") == "authed"
             await ws.send(json.dumps({"type": "bind_chat", "chatId": chat_id}))
+            # 中文注释：等待 bind 确认，确保后续 send 可以被正确路由到 chat 会话。
+            bound_frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=5.0))
+            assert bound_frame.get("type") == "bound"
             await ws.send(
                 json.dumps(
                     {

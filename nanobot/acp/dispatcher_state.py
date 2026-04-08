@@ -23,6 +23,11 @@ def _init_dispatcher_state(dispatcher: Any) -> None:
     dispatcher._session_desired = {}
     # 中文注释：activation ensure 轮次标记仅用于运行时去抖，不参与磁盘持久化。
     dispatcher._session_activation_ensure_epoch = {}
+    # 中文注释：记录启动批次已激活成功的 session_key，连接 epoch 确认后再写 ensured 标记。
+    dispatcher._session_bootstrap_activated_keys = set()
+    from nanobot.acp.session_map_binding_manager import _SessionMapBindingManager
+
+    dispatcher._session_map_binding_manager = _SessionMapBindingManager(dispatcher)
     dispatcher._active_tasks = {}
     dispatcher.last_target = None
     # 中文注释：通过 dispatcher 兼容导出层读取 get_data_dir，保持历史 monkeypatch 注入点不变。

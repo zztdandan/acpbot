@@ -5,9 +5,12 @@
 
 from __future__ import annotations
 
-from typing import Any, ClassVar, Protocol
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
 from nanobot.bus.events import OutboundMessage
+
+if TYPE_CHECKING:
+    from nanobot.acp.session_map_binding_manager import _SessionMapBindingManager
 
 
 class _DispatcherCommandPorts(Protocol):
@@ -15,8 +18,7 @@ class _DispatcherCommandPorts(Protocol):
 
     _HELP_TEXT: ClassVar[Any]
     _conn: Any
-    _session_map: dict[str, str]
-    _session_desired: dict[str, dict[str, str]]
+    _session_map_binding_manager: _SessionMapBindingManager
     _session_caps: dict[str, Any]
     _connection_epoch: int
     _session_activation_ensure_epoch: dict[str, int]
@@ -33,10 +35,6 @@ class _DispatcherCommandPorts(Protocol):
     async def _list_models_command(self, session_id: str) -> str: ...
 
     async def _list_agents_command(self, session_id: str) -> str: ...
-
-    async def _refresh_session_caps_from_server(self, session_id: str) -> bool: ...
-
-    def _persist_session_map(self) -> None: ...
 
     async def _publish_outbound_with_debug(
         self,

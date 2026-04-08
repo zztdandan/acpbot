@@ -31,10 +31,25 @@ def acp_e2e_session_key() -> str:
 
 
 @pytest.fixture
-def acp_e2e_data_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Isolate ACP session-map and audit JSONL under tmp path."""
+def acp_e2e_runtime_root(request: pytest.FixtureRequest) -> Path:
+    """Place E2E runtime artifacts under repository for manual review."""
 
-    root = tmp_path / ".nanobot" / "acp-e2e"
+    # 中文注释：用户要求把 cwd/workspace 固定到仓库目录，便于人工审计对话与 session-map。
+    root = Path(__file__).resolve().parent / "artifacts" / "runtime" / request.node.name
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+@pytest.fixture
+def acp_e2e_data_root(
+    acp_e2e_runtime_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Path:
+    """Isolate ACP session-map and audit JSONL under repository runtime path."""
+
+    root = acp_e2e_runtime_root / ".nanobot" / "acp-e2e"
     root.mkdir(parents=True, exist_ok=True)
     # 中文注释：dispatcher_state 通过 nanobot.acp.dispatcher.get_data_dir 读取会话映射路径。
     monkeypatch.setattr("nanobot.acp.dispatcher.get_data_dir", lambda: root)
@@ -44,10 +59,10 @@ def acp_e2e_data_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture
-def acp_e2e_workspace(tmp_path: Path) -> Path:
-    """Provide dedicated ACP cwd for E2E suite."""
+def acp_e2e_workspace(acp_e2e_runtime_root: Path) -> Path:
+    """Provide dedicated ACP cwd for E2E suite under repository runtime path."""
 
-    workspace = tmp_path / "workspace"
+    workspace = acp_e2e_runtime_root / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
     stage_file_transport_workspace(workspace)
     return workspace
