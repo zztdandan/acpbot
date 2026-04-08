@@ -1,0 +1,21 @@
+{
+  "version": 2,
+  "mappings": [
+    {
+      "cwd": "/home/base/repo/harness/nanobot-refactor/.worktrees/acp-session-map-binding-manager/tests/acp_e2e/artifacts/runtime/test_e2e_ws_005_multi_chat_model_switch_smoke/workspace",
+      "nanobotSideSessionKey": "websocket:acp-e2e-ws-chat-a",
+      "acpSideSessionId": "ses_2925f0682ffe7RZe9YBt4hbENL",
+      "updatedAt": "2026-04-08T23:06:53+08:00",
+      "revision": 5,
+      "boundModel": "x-aio/GLM-5"
+    },
+    {
+      "cwd": "/home/base/repo/harness/nanobot-refactor/.worktrees/acp-session-map-binding-manager/tests/acp_e2e/artifacts/runtime/test_e2e_ws_005_multi_chat_model_switch_smoke/workspace",
+      "nanobotSideSessionKey": "websocket:acp-e2e-ws-chat-b",
+      "acpSideSessionId": "ses_2925eeaedffe3eSFPV1ivkJ4VH",
+      "updatedAt": "2026-04-08T23:07:31+08:00",
+      "revision": 5,
+      "boundModel": "x-aio/GLM-5"
+    }
+  ]
+}

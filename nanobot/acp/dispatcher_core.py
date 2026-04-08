@@ -31,11 +31,11 @@ from nanobot.acp.session_caps import (
 )
 from nanobot.acp.session_update_router import _route_session_update
 from nanobot.acp.session_map import _SessionMapSupport
+from nanobot.acp.session_map_binding_manager import _SessionMapBindingManager
 from nanobot.acp.session_runtime import (
     _activate_existing_session,
     _ensure_connection,
     _ensure_session,
-    _refresh_session_caps_from_server,
     _process_direct_impl,
 )
 from nanobot.acp.session_runtime_mcp import _convert_mcp_servers
@@ -69,6 +69,8 @@ class ACPDispatcher(_ACPFileTransportMixin, _SessionMapSupport, _ACPObservabilit
     _session_pending_media: dict[str, list[str]]
     _connection_epoch: int
     _session_activation_ensure_epoch: dict[str, int]
+    _session_bootstrap_activated_keys: set[str]
+    _session_map_binding_manager: _SessionMapBindingManager
 
     # ACP 模式下可用的 slash 命令帮助文本。
     _HELP_TEXT: ClassVar[str] = (
@@ -121,6 +123,8 @@ class ACPDispatcher(_ACPFileTransportMixin, _SessionMapSupport, _ACPObservabilit
         self._session_pending_media: dict[str, list[str]]
         self._connection_epoch: int
         self._session_activation_ensure_epoch: dict[str, int]
+        self._session_bootstrap_activated_keys: set[str]
+        self._session_map_binding_manager: _SessionMapBindingManager
         _init_dispatcher_state(self)
         # 中文注释：connection epoch 用于标记“当前稳定连接周期”，重连后递增，驱动会话重激活一次。
         self._connection_epoch = 0
@@ -283,10 +287,6 @@ class ACPDispatcher(_ACPFileTransportMixin, _SessionMapSupport, _ACPObservabilit
             session_id=session_id,
         )
 
-    async def _refresh_session_caps_from_server(self, session_id: str) -> bool:
-        """主动从 ACP 拉取 session 能力状态，刷新模型/agent 缓存。"""
-        return await _refresh_session_caps_from_server(self, session_id=session_id)
-
     def _convert_mcp_servers(self) -> list[Any]:
         """把 nanobot MCP 配置转换为 ACP schema。"""
         return _convert_mcp_servers(self.mcp_servers)
@@ -372,5 +372,6 @@ class ACPDispatcher(_ACPFileTransportMixin, _SessionMapSupport, _ACPObservabilit
         self._conn = None
         self._proc = None
         self._session_map_bootstrapped = False
+        self._session_map_binding_manager.mark_unbootstrapped()
         # 中文注释：可观测性资源统一由 mixin 关闭，避免主流程混入文件句柄细节。
         self._close_observability()

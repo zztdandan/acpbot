@@ -1,0 +1,4 @@
+x-aio/MiniMax-M2.5
+x-aio/Kimi-K2.5
+x-aio/Qwen3.5-Plus
+x-aio/GLM-5
