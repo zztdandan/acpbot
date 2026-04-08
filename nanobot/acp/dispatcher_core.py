@@ -300,8 +300,8 @@ class ACPDispatcher(_ACPFileTransportMixin, _SessionMapSupport, _ACPObservabilit
         preferred_model: str | None = None,
         preferred_agent: str | None = None,
         on_progress: Callable[[str], Awaitable[None]] | None = None,
-    ) -> str:
-        """直接发送一轮 prompt 到指定 session，并返回聚合后的文本。"""
+    ) -> OutboundMessage:
+        """直接发送一轮 prompt 到指定 session，并返回标准 OutboundMessage。"""
         return await _process_direct_impl(
             self,
             content,

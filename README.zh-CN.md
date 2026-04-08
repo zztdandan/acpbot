@@ -30,10 +30,11 @@ OpenClaw 系服务很多都自研了底层 agent runtime。对于通用助手场
 ## 你可以得到什么
 
 - 保留 nanobot 成熟的渠道能力与 inbound/outbound 管线。
-- 直接接入 ACP 兼容的编程 agent 与你原有预设。
+- 直接接入 ACP 兼容的编程 agent 与你原有预设skill tool subagent CLAUDE.md等一切。
 - 作为可调试的 AI 底座用于日常工程任务。
 - 可随时手动接管会话、介入处理后再交回。
-- 会话记录可持续保留，便于回放、审计与控制。
+- 会话记录可持续保留在开发 cli 中，便于回放、审计与控制。
+- 使用开发 cli 更好的记忆功能、生态体系、适配的工具
 
 ## 兼容性说明
 
@@ -89,6 +90,8 @@ OpenClaw 系服务很多都自研了底层 agent runtime。对于通用助手场
 
 - 扩展 `session/update` 对 thought/plan/usage/config/info/commands 等更新类型的处理。
 - 增强“能力关闭场景下异常 RPC”韧性，避免会话崩溃。
+- 制定并冻结 ACP 出站 `metadata` 规范（字段契约、兼容等级、迁移路径）。
+- 按里程碑逐步让 dispatcher/runtime 输出结构化 `metadata`，并与 native 行为做一致性校验。
 - 按 `tests/acp_e2e` 逐项完成 D/E/F backlog 并收敛验收口径。
 
 ### 阶段 4：交付与运行保障

@@ -1400,7 +1400,7 @@ async def test_invalid_params_rebind_keeps_activate_marker_semantics(tmp_path: P
         chat_id="chat-rebind",
     )
 
-    assert result == ""
+    assert result.content == ""
     assert conn.resume_calls == ["sid-stale"]
     rebound_session_id = dispatcher._session_map["telegram:invalid-params-rebind"]
     assert rebound_session_id != "sid-stale"
@@ -1494,7 +1494,7 @@ async def test_connection_closed_rebind_resets_state_and_rebuilds_once(
         chat_id="chat-reconnect",
     )
 
-    assert result == ""
+    assert result.content == ""
     assert old_cm.exit_calls == 1
     assert rebuilds["count"] == 1
     assert dispatcher._conn is new_conn

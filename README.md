@@ -89,6 +89,8 @@ Based on the current project docs (`docs/design`, `docs/issue`, `docs/research`,
 
 - Expand `session/update` handling to thought/plan/usage/config/info command updates.
 - Improve resilience for unexpected RPC calls when capabilities are disabled.
+- Define and ratify ACP outbound `metadata` schema (field contract, compatibility level, migration path).
+- Migrate dispatcher/runtime to emit typed `metadata` incrementally, with parity checks against native behavior.
 - Close D/E/F backlog test suites in `tests/acp_e2e` with clear acceptance criteria.
 
 ### Phase 4 - Delivery hardening

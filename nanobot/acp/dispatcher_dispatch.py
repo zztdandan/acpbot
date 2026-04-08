@@ -37,7 +37,7 @@ class _DispatcherFlowPorts(Protocol):
         preferred_model: str | None = None,
         preferred_agent: str | None = None,
         on_progress: Any = None,
-    ) -> str: ...
+    ) -> OutboundMessage: ...
 
     async def _audit_inbound(self, *, msg: InboundMessage, session_key: str) -> None: ...
 
@@ -125,7 +125,7 @@ async def _dispatch_inbound(dispatcher: _DispatcherFlowPorts, msg: InboundMessag
                 if dispatcher.channels_config is None
                 else dispatcher.channels_config.send_final
             )
-            response: str | None = None
+            response: OutboundMessage | None = None
             partial: str | None = None
             dispatch_error: _ACPDispatchError | None = None
             response_media: list[str] = []
@@ -216,13 +216,20 @@ async def _dispatch_inbound(dispatcher: _DispatcherFlowPorts, msg: InboundMessag
                 raise dispatch_error
 
             if response is not None and send_final:
+                if isinstance(response, str):
+                    # Backward compatibility for tests/mocks still returning plain text.
+                    response = OutboundMessage(
+                        channel=msg.channel, chat_id=msg.chat_id, content=response
+                    )
+                final_metadata = dispatcher._sanitize_outbound_metadata(msg.metadata)
+                final_metadata.update(response.metadata or {})
                 await dispatcher._publish_outbound_with_debug(
                     msg=OutboundMessage(
                         channel=msg.channel,
                         chat_id=msg.chat_id,
-                        content=dispatcher._format_final_content(response),
-                        media=response_media,
-                        metadata=dispatcher._sanitize_outbound_metadata(msg.metadata),
+                        content=dispatcher._format_final_content(response.content),
+                        media=response.media or response_media,
+                        metadata=final_metadata,
                     ),
                     reason="final_response",
                     session_key=key,

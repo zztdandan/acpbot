@@ -14,6 +14,7 @@ from nanobot.acp.acp_factory import _acp_spawn_agent_process
 from nanobot.acp.client import _NanobotACPClient
 from nanobot.acp.session_caps import _update_caps_from_session_payload
 from nanobot.acp.state import _ACPDispatchError, _SessionCapabilities, _StreamState
+from nanobot.bus.events import OutboundMessage
 
 
 class _SessionRuntimePorts(Protocol):
@@ -478,9 +479,8 @@ async def _process_direct_impl(
     preferred_model: str | None = None,
     preferred_agent: str | None = None,
     on_progress: Callable[[str], Awaitable[None]] | None = None,
-) -> str:
-    """直接发送一轮 prompt 到指定 session，并返回聚合后的文本。"""
-    del chat_id
+) -> OutboundMessage:
+    """直接发送一轮 prompt 到指定 session，并返回标准 OutboundMessage。"""
     await _ensure_connection(runtime)
     if runtime._conn is None:
         raise RuntimeError("ACP connection is not available")
@@ -591,7 +591,13 @@ async def _process_direct_impl(
                     partial_esc,
                 )
                 raise _ACPDispatchError(partial_response=state.final()) from exc
-        return state.final()
+        return OutboundMessage(
+            channel=channel,
+            chat_id=chat_id,
+            content=state.final(),
+            media=state.final_media(),
+            metadata={},
+        )
     finally:
         runtime._session_pending_media.pop(session_key, None)
         runtime._session_result_media[session_key] = state.final_media()
