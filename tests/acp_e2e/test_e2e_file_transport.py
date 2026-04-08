@@ -20,9 +20,9 @@ async def _install_prompt_recorder(acp_e2e_harness) -> list[list[Any]]:
     records: list[list[Any]] = []
     original_prompt = conn.prompt
 
-    async def _recording_prompt(*, prompt, session_id):
+    async def _recording_prompt(*, prompt, session_id, **kwargs):
         records.append(list(prompt))
-        return await original_prompt(prompt=prompt, session_id=session_id)
+        return await original_prompt(prompt=prompt, session_id=session_id, **kwargs)
 
     conn.prompt = _recording_prompt  # type: ignore[method-assign]
     await asyncio.sleep(0)

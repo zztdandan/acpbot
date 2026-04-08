@@ -12,7 +12,7 @@ from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.websocket import WebSocketChannel, WebSocketConfig
 
-from .helpers import require_e2e_enabled
+from .helpers import file_transport_fixture_source_dir, require_e2e_enabled
 
 
 @dataclass(eq=False)
@@ -53,6 +53,12 @@ def _make_channel(*, allow_from: list[str], tokens: list[str]) -> WebSocketChann
     return WebSocketChannel(config, MessageBus())
 
 
+def _doctor_fixture_bytes() -> bytes:
+    """Load canonical doctor.txt bytes used by FT/WS E2E."""
+
+    return (file_transport_fixture_source_dir() / "doctor.txt").read_bytes()
+
+
 @pytest.mark.asyncio
 async def test_e2e_ws_001_inbound_blob_is_materialized_as_local_media_path(
     tmp_path: Path,
@@ -67,7 +73,7 @@ async def test_e2e_ws_001_inbound_blob_is_materialized_as_local_media_path(
     )
 
     channel = _make_channel(allow_from=["*"], tokens=["ok-token"])
-    payload = b"ws-inbound-blob"
+    payload = _doctor_fixture_bytes()
     conn = _FakeConnection(
         incoming=[
             json.dumps({"type": "auth", "token": "ok-token", "principalId": "ws-u-1"}),
@@ -79,7 +85,7 @@ async def test_e2e_ws_001_inbound_blob_is_materialized_as_local_media_path(
                     "media": [
                         {
                             "mode": "blob",
-                            "filename": "inbound.txt",
+                            "filename": "doctor.txt",
                             "mimeType": "text/plain",
                             "data": base64.b64encode(payload).decode("ascii"),
                         }
@@ -112,8 +118,8 @@ async def test_e2e_ws_002_outbound_media_path_is_encoded_to_blob_for_ws_peer(
     await channel._register_connection(conn, "ws-u-2")
     channel._chat_subscribers.setdefault("ws-chat-out", set()).add(conn)
 
-    sample = tmp_path / "outbound.txt"
-    sample.write_bytes(b"ws-outbound-blob")
+    sample = tmp_path / "doctor.txt"
+    sample.write_bytes(_doctor_fixture_bytes())
 
     await channel.send(
         OutboundMessage(
@@ -131,7 +137,9 @@ async def test_e2e_ws_002_outbound_media_path_is_encoded_to_blob_for_ws_peer(
     media = frame.get("media")
     assert isinstance(media, list) and media
     assert media[0].get("mode") == "blob"
-    assert media[0].get("filename") == "outbound.txt"
+    filename = str(media[0].get("filename") or "")
+    assert filename.endswith("doctor.txt")
+    assert media[0].get("data") == base64.b64encode(_doctor_fixture_bytes()).decode("ascii")
 
     await channel._cleanup_connection(conn, close_code=None, reason="done")
 
@@ -151,7 +159,7 @@ async def test_e2e_ws_003_blob_roundtrip_inbound_to_outbound_contract(
 
     channel = _make_channel(allow_from=["*"], tokens=["ok-token"])
 
-    inbound_payload = b"roundtrip-inbound"
+    inbound_payload = _doctor_fixture_bytes()
     conn_in = _FakeConnection(
         incoming=[
             json.dumps({"type": "auth", "token": "ok-token", "principalId": "ws-u-in"}),
@@ -163,7 +171,7 @@ async def test_e2e_ws_003_blob_roundtrip_inbound_to_outbound_contract(
                     "media": [
                         {
                             "mode": "blob",
-                            "filename": "rt-in.txt",
+                            "filename": "doctor.txt",
                             "data": base64.b64encode(inbound_payload).decode("ascii"),
                         }
                     ],
@@ -194,5 +202,8 @@ async def test_e2e_ws_003_blob_roundtrip_inbound_to_outbound_contract(
     assert frame.get("type") == "final"
     media = frame.get("media")
     assert isinstance(media, list) and media and media[0].get("mode") == "blob"
+    filename = str(media[0].get("filename") or "")
+    assert filename.endswith("doctor.txt")
+    assert media[0].get("data") == base64.b64encode(_doctor_fixture_bytes()).decode("ascii")
 
     await channel._cleanup_connection(conn_out, close_code=None, reason="done")
