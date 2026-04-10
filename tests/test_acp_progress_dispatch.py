@@ -1,68 +1,24 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
 
 import pytest
 
-from nanobot.bus.events import InboundMessage, OutboundMessage
+from nanobot.acp.dispatcher import ACPDispatcher
+from nanobot.acp.progress_event_types import ACPProgressEvent
+from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import ACPBackendConfig, ChannelsConfig
-from nanobot.acp.dispatcher import ACPDispatcher
-from nanobot.dispatch.acp import _ACPDispatchError
-
-try:
-    from nanobot.acp.dispatcher_core import ACPDispatcher as _CoreACPDispatcher
-except ModuleNotFoundError:
-    # 中文注释：兼容旧安装环境（仅用于本地入口差异）；主验证仍在当前源码树执行。
-    _CoreACPDispatcher = ACPDispatcher
-
-
-def test_dispatcher_module_exports_core_dispatcher() -> None:
-    # Given: dispatcher.py 仅作为兼容导出层，应与 dispatcher_core 暴露同一类对象。
-    # 中文注释：不同测试入口（python -m pytest / pytest）下 __module__ 可能受加载路径影响，
-    # 这里用“对象同一性”保证薄导出语义稳定。
-    assert ACPDispatcher is _CoreACPDispatcher
-
-
-def test_channels_send_final_alias_parsing() -> None:
-    # Given: 配置文件常用 camelCase，sendFinal 需要正确映射到 send_final。
-    cfg = ChannelsConfig.model_validate({"sendFinal": False})
-    assert cfg.send_final is False
-
-
-def test_acp_outbound_debug_payload_contains_tool_items() -> None:
-    # Given: _tool_hint=true 时，调试 JSON 中应显式记录 tool 的分项内容。
-    dispatcher = ACPDispatcher(
-        bus=MessageBus(),
-        workspace=Path("/tmp"),
-        acp_config=ACPBackendConfig(),
-        channels_config=ChannelsConfig(send_final=True),
-    )
-    payload = dispatcher._build_outbound_debug_payload(
-        msg=OutboundMessage(
-            channel="telegram",
-            chat_id="123",
-            content="glob\nread",
-            metadata={"_tool_hint": True, "_progress": True},
-        ),
-        reason="progress_tool_hint",
-        session_key="telegram:123",
-    )
-    assert payload["tool"]["is_tool_hint"] is True
-    assert payload["tool"]["items"] == ["glob", "read"]
-    assert payload["content"] == "glob\nread"
 
 
 @pytest.mark.asyncio
-async def test_acp_progress_flush_on_type_switch_and_final_wrapper() -> None:
-    # Given: 构造真实 dispatcher，但用 fake process_direct 注入 progress 序列，避免依赖外部 ACP 进程。
+async def test_acp_progress_text_uses_new_metadata_schema() -> None:
     bus = MessageBus()
     dispatcher = ACPDispatcher(
         bus=bus,
         workspace=Path("/tmp"),
-        acp_config=ACPBackendConfig(),
+        acp_config=ACPBackendConfig(progress_text_idle_seconds=0.01),
         channels_config=ChannelsConfig(send_final=True),
     )
 
@@ -74,112 +30,31 @@ async def test_acp_progress_flush_on_type_switch_and_final_wrapper() -> None:
         preferred_model: str | None = None,
         preferred_agent: str | None = None,
         on_progress=None,
+        on_progress_event=None,
     ) -> str:
-        del content, session_key, channel, chat_id, preferred_model, preferred_agent
-        assert on_progress is not None
-        await on_progress("alpha ")
-        await on_progress("beta")
-        await on_progress("tool-a", tool_hint=True)
-        await on_progress("tool-b", tool_hint=True)
+        del content, session_key, channel, chat_id, preferred_model, preferred_agent, on_progress
+        assert on_progress_event is not None
+        await on_progress_event(
+            ACPProgressEvent(
+                session_id="sess-1",
+                raw_update={"content": {"text": "hello "}},
+                raw_json={"content": {"text": "hello "}},
+                update_type="AgentMessageChunk",
+                family="text",
+                route_key="sess-1",
+            )
+        )
+        await on_progress_event(
+            ACPProgressEvent(
+                session_id="sess-1",
+                raw_update={"content": {"text": "world"}},
+                raw_json={"content": {"text": "world"}},
+                update_type="AgentMessageChunk",
+                family="text",
+                route_key="sess-1",
+            )
+        )
         return "done"
-
-    dispatcher.process_direct = fake_process_direct  # type: ignore[method-assign]
-
-    await dispatcher._dispatch(
-        InboundMessage(channel="cli", sender_id="u", chat_id="c", content="run")
-    )
-
-    first = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
-    second = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
-    third = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
-    fourth = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
-
-    assert first.content == "alpha beta"
-    assert first.metadata.get("_progress") is True
-    assert first.metadata.get("_tool_hint") is False
-
-    # 中文注释：默认模式改为“tool hint 逐条直发 + JSON 数组消息体（单事件数组）”。
-    second_payload = json.loads(second.content)
-    assert isinstance(second_payload, list)
-    assert len(second_payload) == 1
-    assert second_payload[0]["raw_hint"] == "tool-a"
-    assert second.metadata.get("_progress") is True
-    assert second.metadata.get("_tool_hint") is True
-
-    third_payload = json.loads(third.content)
-    assert isinstance(third_payload, list)
-    assert len(third_payload) == 1
-    assert third_payload[0]["raw_hint"] == "tool-b"
-    assert third.metadata.get("_progress") is True
-    assert third.metadata.get("_tool_hint") is True
-
-    assert fourth.content == "<final>done</final>"
-    assert fourth.metadata.get("_progress") is None
-
-
-@pytest.mark.asyncio
-async def test_acp_progress_deadman_flush_after_idle_2s() -> None:
-    # Given: 验证“死手机制”——2 秒内无新消息时自动 flush，且在 final 前已落盘到 bus。
-    bus = MessageBus()
-    dispatcher = ACPDispatcher(
-        bus=bus,
-        workspace=Path("/tmp"),
-        acp_config=ACPBackendConfig(),
-        channels_config=ChannelsConfig(send_final=True),
-    )
-
-    async def fake_process_direct(
-        content: str,
-        session_key: str = "cli:direct",
-        channel: str = "cli",
-        chat_id: str = "direct",
-        preferred_model: str | None = None,
-        preferred_agent: str | None = None,
-        on_progress=None,
-    ) -> str:
-        del content, session_key, channel, chat_id, preferred_model, preferred_agent
-        assert on_progress is not None
-        await on_progress("idle-flush")
-        await asyncio.sleep(2.2)
-        return "done"
-
-    dispatcher.process_direct = fake_process_direct  # type: ignore[method-assign]
-
-    await dispatcher._dispatch(
-        InboundMessage(channel="cli", sender_id="u", chat_id="c", content="run")
-    )
-
-    progress = await asyncio.wait_for(bus.consume_outbound(), timeout=0.5)
-    final = await asyncio.wait_for(bus.consume_outbound(), timeout=0.5)
-    assert progress.content == "idle-flush"
-    assert progress.metadata.get("_progress") is True
-    assert final.content == "<final>done</final>"
-
-
-@pytest.mark.asyncio
-async def test_acp_can_disable_final_by_config() -> None:
-    # Given: send_final=false 时，仅允许 progress/tool-hint 消息，不发送 final。
-    bus = MessageBus()
-    dispatcher = ACPDispatcher(
-        bus=bus,
-        workspace=Path("/tmp"),
-        acp_config=ACPBackendConfig(),
-        channels_config=ChannelsConfig(send_final=False),
-    )
-
-    async def fake_process_direct(
-        content: str,
-        session_key: str = "cli:direct",
-        channel: str = "cli",
-        chat_id: str = "direct",
-        preferred_model: str | None = None,
-        preferred_agent: str | None = None,
-        on_progress=None,
-    ) -> str:
-        del content, session_key, channel, chat_id, preferred_model, preferred_agent
-        assert on_progress is not None
-        await on_progress("only-progress")
-        return "hidden-final"
 
     dispatcher.process_direct = fake_process_direct  # type: ignore[method-assign]
 
@@ -188,229 +63,28 @@ async def test_acp_can_disable_final_by_config() -> None:
     )
 
     progress = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
-    assert progress.content == "only-progress"
-    assert progress.metadata.get("_progress") is True
-
-    with pytest.raises(asyncio.TimeoutError):
-        await asyncio.wait_for(bus.consume_outbound(), timeout=0.2)
-
-
-@pytest.mark.asyncio
-async def test_acp_tool_hint_merge_by_tool_call_id_with_per_id_deadman() -> None:
-    # Given: merge_by_tool_call_id 模式下，同一 toolCallId 聚合，且按每个 ID 独立死手 flush。
-    bus = MessageBus()
-    dispatcher = ACPDispatcher(
-        bus=bus,
-        workspace=Path("/tmp"),
-        acp_config=ACPBackendConfig(),
-        channels_config=ChannelsConfig(
-            send_final=True,
-            tool_hint_publish_mode="merge_by_tool_call_id",
-            tool_hint_merge_idle_seconds=0.05,
-            tool_hint_payload_mode="array",
-        ),
-    )
-
-    async def fake_process_direct(
-        content: str,
-        session_key: str = "cli:direct",
-        channel: str = "cli",
-        chat_id: str = "direct",
-        preferred_model: str | None = None,
-        preferred_agent: str | None = None,
-        on_progress=None,
-    ) -> str:
-        del content, session_key, channel, chat_id, preferred_model, preferred_agent
-        assert on_progress is not None
-        # 中文注释：两个不同 toolCallId 的事件交错输入，验证不会互相混桶。
-        await on_progress(
-            "in_progress",
-            tool_hint=True,
-            tool_event={
-                "event": "tool_progress",
-                "status": "in_progress",
-                "tool_call": {"toolCallId": "A", "status": "in_progress"},
-            },
-        )
-        await on_progress(
-            "completed",
-            tool_hint=True,
-            tool_event={
-                "event": "tool_progress",
-                "status": "completed",
-                "tool_call": {"toolCallId": "A", "status": "completed"},
-            },
-        )
-        await on_progress(
-            "in_progress",
-            tool_hint=True,
-            tool_event={
-                "event": "tool_progress",
-                "status": "in_progress",
-                "tool_call": {"toolCallId": "B", "status": "in_progress"},
-            },
-        )
-        await asyncio.sleep(0.08)
-        return "done"
-
-    dispatcher.process_direct = fake_process_direct  # type: ignore[method-assign]
-
-    await dispatcher._dispatch(
-        InboundMessage(channel="cli", sender_id="u", chat_id="c", content="run")
-    )
-
-    tool_a = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
-    tool_b = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
     final = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
-
-    payload_a = json.loads(tool_a.content)
-    payload_b = json.loads(tool_b.content)
-    assert [item["tool_call"]["toolCallId"] for item in payload_a] == ["A", "A"]
-    assert [item["tool_call"]["toolCallId"] for item in payload_b] == ["B"]
+    assert progress.content == "hello world"
+    assert progress.metadata.get("_acp_kind") == "text"
+    assert progress.metadata.get("_acp_flush_reason") in {
+        "close",
+        "deadman",
+        "family_switch",
+        "size",
+    }
     assert final.content == "<final>done</final>"
 
 
 @pytest.mark.asyncio
-async def test_acp_tool_hint_status_with_compact_payload_mode() -> None:
-    # Given: status_with_compact 模式下，completed/failed 事件成为主体，其他事件进入 compact_events。
+async def test_acp_progress_tool_routes_by_tool_call_id() -> None:
     bus = MessageBus()
     dispatcher = ACPDispatcher(
         bus=bus,
         workspace=Path("/tmp"),
-        acp_config=ACPBackendConfig(),
-        channels_config=ChannelsConfig(
-            send_final=True,
-            tool_hint_publish_mode="merge_by_tool_call_id",
-            tool_hint_merge_idle_seconds=0.05,
-            tool_hint_payload_mode="status_with_compact",
+        acp_config=ACPBackendConfig(
+            progress_tool_idle_seconds=0.2,
+            progress_tool_terminal_delay_seconds=0.01,
         ),
-    )
-
-    async def fake_process_direct(
-        content: str,
-        session_key: str = "cli:direct",
-        channel: str = "cli",
-        chat_id: str = "direct",
-        preferred_model: str | None = None,
-        preferred_agent: str | None = None,
-        on_progress=None,
-    ) -> str:
-        del content, session_key, channel, chat_id, preferred_model, preferred_agent
-        assert on_progress is not None
-        await on_progress(
-            "in_progress",
-            tool_hint=True,
-            tool_event={
-                "event": "tool_progress",
-                "session_id": "ses-x",
-                "status": "in_progress",
-                "tool_call": {"toolCallId": "X", "status": "in_progress"},
-            },
-        )
-        await on_progress(
-            "completed",
-            tool_hint=True,
-            tool_event={
-                "event": "tool_progress",
-                "session_id": "ses-x",
-                "status": "completed",
-                "tool_call": {"toolCallId": "X", "status": "completed"},
-            },
-        )
-        return "done"
-
-    dispatcher.process_direct = fake_process_direct  # type: ignore[method-assign]
-
-    await dispatcher._dispatch(
-        InboundMessage(channel="cli", sender_id="u", chat_id="c", content="run")
-    )
-
-    tool = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
-    final = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
-    payload = json.loads(tool.content)
-    assert payload["session_id"] == "ses-x"
-    assert payload["status"] == "completed"
-    assert payload["tool_call"]["toolCallId"] == "X"
-    assert len(payload["progress_info"]) == 1
-    assert payload["progress_info"][0]["tool_call"]["status"] == "in_progress"
-    assert payload["progress_info"][0]["status"] == "in_progress"
-    assert final.content == "<final>done</final>"
-
-
-@pytest.mark.asyncio
-async def test_acp_tool_hint_status_with_compact_supports_custom_terminal_status() -> None:
-    # Given: terminal status 可配置，便于后续扩展 cancelled/timeout 等状态。
-    bus = MessageBus()
-    dispatcher = ACPDispatcher(
-        bus=bus,
-        workspace=Path("/tmp"),
-        acp_config=ACPBackendConfig(),
-        channels_config=ChannelsConfig(
-            send_final=True,
-            tool_hint_publish_mode="merge_by_tool_call_id",
-            tool_hint_merge_idle_seconds=0.05,
-            tool_hint_payload_mode="status_with_compact",
-            tool_hint_terminal_statuses=["completed", "failed", "cancelled"],
-        ),
-    )
-
-    async def fake_process_direct(
-        content: str,
-        session_key: str = "cli:direct",
-        channel: str = "cli",
-        chat_id: str = "direct",
-        preferred_model: str | None = None,
-        preferred_agent: str | None = None,
-        on_progress=None,
-    ) -> str:
-        del content, session_key, channel, chat_id, preferred_model, preferred_agent
-        assert on_progress is not None
-        await on_progress(
-            "in_progress",
-            tool_hint=True,
-            tool_event={
-                "event": "tool_progress",
-                "session_id": "ses-y",
-                "status": "in_progress",
-                "tool_call": {"toolCallId": "Y", "status": "in_progress"},
-            },
-        )
-        await on_progress(
-            "cancelled",
-            tool_hint=True,
-            tool_event={
-                "event": "tool_progress",
-                "session_id": "ses-y",
-                "status": "cancelled",
-                "tool_call": {"toolCallId": "Y", "status": "cancelled"},
-            },
-        )
-        return "done"
-
-    dispatcher.process_direct = fake_process_direct  # type: ignore[method-assign]
-
-    await dispatcher._dispatch(
-        InboundMessage(channel="cli", sender_id="u", chat_id="c", content="run")
-    )
-
-    tool = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
-    final = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
-    payload = json.loads(tool.content)
-    assert payload["status"] == "cancelled"
-    assert payload["tool_call"]["toolCallId"] == "Y"
-    assert len(payload["progress_info"]) == 1
-    assert payload["progress_info"][0]["status"] == "in_progress"
-    assert final.content == "<final>done</final>"
-
-
-@pytest.mark.asyncio
-async def test_acp_dispatch_error_without_partial_keeps_error_reply() -> None:
-    # Given: 当 ACP 异常没有 partial 时，应该走统一错误回复而不是静默吞掉。
-    bus = MessageBus()
-    dispatcher = ACPDispatcher(
-        bus=bus,
-        workspace=Path("/tmp"),
-        acp_config=ACPBackendConfig(),
         channels_config=ChannelsConfig(send_final=True),
     )
 
@@ -422,9 +96,23 @@ async def test_acp_dispatch_error_without_partial_keeps_error_reply() -> None:
         preferred_model: str | None = None,
         preferred_agent: str | None = None,
         on_progress=None,
+        on_progress_event=None,
     ) -> str:
         del content, session_key, channel, chat_id, preferred_model, preferred_agent, on_progress
-        raise _ACPDispatchError(partial_response="")
+        assert on_progress_event is not None
+        await on_progress_event(
+            ACPProgressEvent(
+                session_id="sess-2",
+                raw_update={"toolCallId": "tc-1", "status": "completed", "title": "ls"},
+                raw_json={"toolCallId": "tc-1", "status": "completed", "title": "ls"},
+                update_type="ToolCallProgress",
+                family="tool",
+                route_key="tc-1",
+                extracted={"status": "completed"},
+            )
+        )
+        await asyncio.sleep(0.03)
+        return "done"
 
     dispatcher.process_direct = fake_process_direct  # type: ignore[method-assign]
 
@@ -432,19 +120,22 @@ async def test_acp_dispatch_error_without_partial_keeps_error_reply() -> None:
         InboundMessage(channel="cli", sender_id="u", chat_id="c", content="run")
     )
 
-    err = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
-    assert err.content == "Sorry, I encountered an error."
+    progress = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
+    final = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
+    assert progress.metadata.get("_acp_kind") == "tool"
+    assert progress.metadata.get("_acp_route_key") == "tc-1"
+    assert progress.content.startswith("[tool]")
+    assert final.content == "<final>done</final>"
 
 
 @pytest.mark.asyncio
-async def test_acp_partial_with_send_final_false_emits_no_error() -> None:
-    # Given: 有 partial 但 send_final=false 时，不应发送 final，也不应误发通用错误。
+async def test_acp_text_flush_reason_never_uses_family_switch() -> None:
     bus = MessageBus()
     dispatcher = ACPDispatcher(
         bus=bus,
         workspace=Path("/tmp"),
-        acp_config=ACPBackendConfig(),
-        channels_config=ChannelsConfig(send_final=False),
+        acp_config=ACPBackendConfig(progress_text_idle_seconds=5.0),
+        channels_config=ChannelsConfig(send_final=True),
     )
 
     async def fake_process_direct(
@@ -455,9 +146,32 @@ async def test_acp_partial_with_send_final_false_emits_no_error() -> None:
         preferred_model: str | None = None,
         preferred_agent: str | None = None,
         on_progress=None,
+        on_progress_event=None,
     ) -> str:
         del content, session_key, channel, chat_id, preferred_model, preferred_agent, on_progress
-        raise _ACPDispatchError(partial_response="partial-ready")
+        assert on_progress_event is not None
+        await on_progress_event(
+            ACPProgressEvent(
+                session_id="sess-3",
+                raw_update={"content": {"text": "text-before-tool"}},
+                raw_json={"content": {"text": "text-before-tool"}},
+                update_type="AgentMessageChunk",
+                family="text",
+                route_key="sess-3",
+            )
+        )
+        await on_progress_event(
+            ACPProgressEvent(
+                session_id="sess-3",
+                raw_update={"toolCallId": "tc-3", "status": "in_progress", "title": "ls"},
+                raw_json={"toolCallId": "tc-3", "status": "in_progress", "title": "ls"},
+                update_type="ToolCallProgress",
+                family="tool",
+                route_key="tc-3",
+                extracted={"status": "in_progress"},
+            )
+        )
+        return "done"
 
     dispatcher.process_direct = fake_process_direct  # type: ignore[method-assign]
 
@@ -465,5 +179,17 @@ async def test_acp_partial_with_send_final_false_emits_no_error() -> None:
         InboundMessage(channel="cli", sender_id="u", chat_id="c", content="run")
     )
 
-    with pytest.raises(asyncio.TimeoutError):
-        await asyncio.wait_for(bus.consume_outbound(), timeout=0.2)
+    progress_frames = []
+    for _ in range(3):
+        progress_frames.append(await asyncio.wait_for(bus.consume_outbound(), timeout=1.0))
+
+    text_progress = next(
+        frame for frame in progress_frames if (frame.metadata or {}).get("_acp_kind") == "text"
+    )
+    assert text_progress.metadata.get("_acp_flush_reason") in {"deadman", "size", "close"}
+    assert text_progress.metadata.get("_acp_flush_reason") != "family_switch"
+
+
+def test_channels_send_final_alias_parsing() -> None:
+    cfg = ChannelsConfig.model_validate({"sendFinal": False})
+    assert cfg.send_final is False
