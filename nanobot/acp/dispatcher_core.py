@@ -69,6 +69,7 @@ class ACPDispatcher(_ACPFileTransportMixin, _SessionMapSupport, _ACPObservabilit
     _session_active_tool_name: dict[str, str]
     _session_result_media: dict[str, list[str]]
     _session_pending_media: dict[str, list[str]]
+    _session_progress_metadata: dict[str, dict[str, Any]]
     _session_targets: dict[str, tuple[str, str, str]]
     _connection_epoch: int
     _session_activation_ensure_epoch: dict[str, int]
@@ -126,6 +127,7 @@ class ACPDispatcher(_ACPFileTransportMixin, _SessionMapSupport, _ACPObservabilit
         self._session_active_tool_name: dict[str, str]
         self._session_result_media: dict[str, list[str]]
         self._session_pending_media: dict[str, list[str]]
+        self._session_progress_metadata: dict[str, dict[str, Any]]
         self._session_targets: dict[str, tuple[str, str, str]]
         self._connection_epoch: int
         self._session_activation_ensure_epoch: dict[str, int]
@@ -291,7 +293,6 @@ class ACPDispatcher(_ACPFileTransportMixin, _SessionMapSupport, _ACPObservabilit
         preferred_model: str | None = None,
         preferred_agent: str | None = None,
         on_progress: Callable[..., Awaitable[None]] | None = None,
-        on_progress_event: Callable[[Any], Awaitable[None]] | None = None,
     ) -> OutboundMessage:
         """直接发送一轮 prompt 到指定 session，并返回标准 OutboundMessage。"""
         return await _process_direct_impl(
@@ -303,7 +304,6 @@ class ACPDispatcher(_ACPFileTransportMixin, _SessionMapSupport, _ACPObservabilit
             preferred_model=preferred_model,
             preferred_agent=preferred_agent,
             on_progress=on_progress,
-            on_progress_event=on_progress_event,
         )
 
     async def _handle_stop(self, msg: InboundMessage) -> None:

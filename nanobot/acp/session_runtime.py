@@ -12,10 +12,11 @@ from loguru import logger
 from nanobot.acp.acp_errors import _is_invalid_params_request_error
 from nanobot.acp.acp_factory import _acp_spawn_agent_process
 from nanobot.acp.client import _NanobotACPClient
-from nanobot.acp.progress_event_types import ACPProgressEvent
+from nanobot.acp.progress_router import ProgressRouter
 from nanobot.acp.session_caps import _update_caps_from_session_payload
 from nanobot.acp.state import _ACPDispatchError, _SessionCapabilities, _StreamState
 from nanobot.bus.events import OutboundMessage
+from nanobot.config.schema import ACPBackendConfig
 
 if TYPE_CHECKING:
     from nanobot.acp.session_map_binding_manager import _SessionMapBindingManager
@@ -25,7 +26,7 @@ class _SessionRuntimePorts(Protocol):
     """session runtime helper 访问 dispatcher 所需的最小端口。"""
 
     workspace: Path
-    acp_config: Any
+    acp_config: ACPBackendConfig
     _conn_cm: Any
     _conn: Any
     _proc: Any
@@ -39,6 +40,7 @@ class _SessionRuntimePorts(Protocol):
     _session_active_tool_name: dict[str, str]
     _session_result_media: dict[str, list[str]]
     _session_pending_media: dict[str, list[str]]
+    _session_progress_metadata: dict[str, dict[str, Any]]
     _session_targets: dict[str, tuple[str, str, str]]
     _session_map_bootstrapped: bool
     _connection_epoch: int
@@ -61,6 +63,17 @@ class _SessionRuntimePorts(Protocol):
         session_key: str,
         channel: str,
     ) -> list[Any]: ...
+
+    @classmethod
+    def _sanitize_outbound_metadata(cls, metadata: dict[str, Any] | None) -> dict[str, Any]: ...
+
+    async def _publish_outbound_with_debug(
+        self,
+        *,
+        msg: OutboundMessage,
+        reason: str,
+        session_key: str,
+    ) -> None: ...
 
 
 async def _ensure_connection(runtime: _SessionRuntimePorts) -> None:
@@ -292,9 +305,8 @@ async def _process_direct_impl(
     preferred_model: str | None = None,
     preferred_agent: str | None = None,
     on_progress: Callable[..., Awaitable[None]] | None = None,
-    on_progress_event: Callable[[ACPProgressEvent], Awaitable[None]] | None = None,
 ) -> OutboundMessage:
-    """直接发送一轮 prompt 到指定 session，并返回标准 OutboundMessage。"""
+    """直接发送一轮 prompt 到指定 session，并返回标准 OutboundMessage。acpdispatcher 核心方法"""
     await _ensure_connection(runtime)
     if runtime._conn is None:
         raise RuntimeError("ACP connection is not available")
@@ -304,19 +316,39 @@ async def _process_direct_impl(
         preferred_model=preferred_model,
         preferred_agent=preferred_agent,
     )
-    # 注册会话级流式状态，供 session_update 回调写入。
-    progress_event_cb = on_progress_event
-    if progress_event_cb is None and on_progress is not None:
-        # 中文注释：兼容旧签名调用方（字符串 progress），把事件降级成文本回调。
-        async def _legacy_event_bridge(event: ACPProgressEvent) -> None:
-            text = ((event.raw_json or {}).get("content") or {}).get("text")
-            if isinstance(text, str) and text:
-                await on_progress(text)
+    progress_meta = runtime._sanitize_outbound_metadata(
+        runtime._session_progress_metadata.pop(session_key, None)
+    )
+    progress_meta["_progress"] = True
 
-        progress_event_cb = _legacy_event_bridge
+    async def _publish_progress(content: str, metadata: dict[str, Any], reason: str) -> None:
+        outbound = OutboundMessage(
+            channel=channel,
+            chat_id=chat_id,
+            content=content,
+            metadata={**progress_meta, **metadata},
+        )
+        await runtime._publish_outbound_with_debug(
+            msg=outbound,
+            reason=reason,
+            session_key=session_key,
+        )
+        if on_progress is not None and content:
+            # 中文注释：on_progress 仅作为降级文本 sink 镜像，不参与 ACP 结构化事件处理本身；
+            # 对 tool family 保留 tool_hint=True，兼容 native/CLI 既有进度消费约定。
+            try:
+                await on_progress(content, tool_hint=metadata.get("_acp_kind") == "tool")
+            except TypeError:
+                # 中文注释：保留对旧式单参数 progress sink 的兼容，避免 direct 调用方被关键字参数打断。
+                await on_progress(content)
+
+    progress_router = ProgressRouter(
+        acp_config=runtime.acp_config,
+        publish=_publish_progress,
+    )
 
     state = _StreamState(
-        on_progress_event=progress_event_cb,
+        on_progress_event=progress_router.on_progress_event,
         dispatcher=runtime,
         session_id=session_id,
     )
@@ -431,7 +463,9 @@ async def _process_direct_impl(
             metadata={},
         )
     finally:
+        await progress_router.close()
         runtime._session_pending_media.pop(session_key, None)
+        runtime._session_progress_metadata.pop(session_key, None)
         runtime._session_result_media[session_key] = state.final_media()
         # 请求结束后清理 session 状态，避免跨请求串流。
         for tracked_session_id in tracked_session_ids:

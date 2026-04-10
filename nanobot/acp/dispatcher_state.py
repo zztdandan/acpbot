@@ -43,5 +43,8 @@ def _init_dispatcher_state(dispatcher: Any) -> None:
     dispatcher._session_result_media = {}
     # 中文注释：_dispatch 预存的 inbound media，process_direct 取出后立即消费，避免跨轮串附件。
     dispatcher._session_pending_media = {}
+    # 中文注释：_dispatch 预存当前轮 progress 需要继承的 metadata，
+    # 让 ACP 内部 progress router 发包时保留 reply/thread 等上游上下文。
+    dispatcher._session_progress_metadata = {}
     # 中文注释：记录 session_id 最近一次对外投递目标，用于 permission request/ack 反向上送。
     dispatcher._session_targets = {}

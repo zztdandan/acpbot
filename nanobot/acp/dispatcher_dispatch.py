@@ -8,7 +8,6 @@ from typing import Any, Awaitable, Protocol, cast
 from loguru import logger
 
 from nanobot.acp.dispatch_commands import _handle_slash_command
-from nanobot.acp.progress_router import ProgressRouter
 from nanobot.acp.state import _ACPDispatchError
 from nanobot.bus.events import InboundMessage, OutboundMessage
 
@@ -21,6 +20,7 @@ class _DispatcherFlowPorts(Protocol):
     _process_locks: dict[str, asyncio.Lock]
     _session_pending_media: dict[str, list[str]]
     _session_result_media: dict[str, list[str]]
+    _session_progress_metadata: dict[str, dict[str, Any]]
     _permission_bridge: Any
     acp_config: Any
 
@@ -39,7 +39,6 @@ class _DispatcherFlowPorts(Protocol):
         preferred_model: str | None = None,
         preferred_agent: str | None = None,
         on_progress: Any = None,
-        on_progress_event: Any = None,
     ) -> OutboundMessage: ...
 
     async def _audit_inbound(self, *, msg: InboundMessage, session_key: str) -> None: ...
@@ -124,8 +123,6 @@ async def _dispatch_inbound(dispatcher: _DispatcherFlowPorts, msg: InboundMessag
             )
 
             metadata = msg.metadata or {}
-            progress_meta = dispatcher._sanitize_outbound_metadata(metadata)
-            progress_meta["_progress"] = True
             preferred_model, preferred_agent = _extract_session_preferences(metadata)
             send_final = (
                 True
@@ -137,43 +134,13 @@ async def _dispatch_inbound(dispatcher: _DispatcherFlowPorts, msg: InboundMessag
             dispatch_error: _ACPDispatchError | None = None
             response_media: list[str] = []
 
-            async def _publish_progress(
-                content: str, metadata: dict[str, Any], reason: str
-            ) -> None:
-                await dispatcher._publish_outbound_with_debug(
-                    msg=OutboundMessage(
-                        channel=msg.channel,
-                        chat_id=msg.chat_id,
-                        content=content,
-                        metadata={**progress_meta, **metadata},
-                    ),
-                    reason=reason,
-                    session_key=key,
-                )
-
-            progress_router = ProgressRouter(
-                text_idle_seconds=float(
-                    getattr(dispatcher.acp_config, "progress_text_idle_seconds", 1.0)
-                ),
-                text_max_chars=int(getattr(dispatcher.acp_config, "progress_text_max_chars", 2048)),
-                tool_idle_seconds=float(
-                    getattr(dispatcher.acp_config, "progress_tool_idle_seconds", 300.0)
-                ),
-                tool_terminal_delay_seconds=float(
-                    getattr(dispatcher.acp_config, "progress_tool_terminal_delay_seconds", 1.5)
-                ),
-                other_idle_seconds=float(
-                    getattr(dispatcher.acp_config, "progress_other_idle_seconds", 0.2)
-                ),
-                media_idle_seconds=float(
-                    getattr(dispatcher.acp_config, "progress_media_idle_seconds", 0.2)
-                ),
-                publish=_publish_progress,
-            )
-
             try:
-                # 中文注释：当前轮附件先挂到 session_key，process_direct 再转换 ACP blocks。
+                # 中文注释：当前轮附件与 progress metadata 先挂到 session_key，
+                # process_direct 内部会创建唯一的 ProgressRouter 并消费这些上下文。
                 dispatcher._session_pending_media[key] = list(msg.media or [])
+                dispatcher._session_progress_metadata[key] = dispatcher._sanitize_outbound_metadata(
+                    metadata
+                )
                 response = await dispatcher.process_direct(
                     msg.content,
                     session_key=key,
@@ -181,15 +148,14 @@ async def _dispatch_inbound(dispatcher: _DispatcherFlowPorts, msg: InboundMessag
                     chat_id=msg.chat_id,
                     preferred_model=preferred_model,
                     preferred_agent=preferred_agent,
-                    on_progress_event=progress_router.on_progress_event,
                 )
             except _ACPDispatchError as exc:
                 dispatch_error = exc
                 partial = exc.partial_response.strip()
             finally:
                 dispatcher._session_pending_media.pop(key, None)
+                dispatcher._session_progress_metadata.pop(key, None)
                 response_media = dispatcher._session_result_media.pop(key, [])
-                await progress_router.close()
 
             if dispatch_error is not None:
                 # ACP 异常时优先尝试输出 partial，减少用户感知中断。

@@ -14,6 +14,7 @@ from nanobot.acp.outbound_content_schema import (
 )
 from nanobot.acp.progress_event_types import ACPProgressEvent
 from nanobot.acp.progress_tool_payload_schema import append_history, build_tool_payload
+from nanobot.config.schema import ACPBackendConfig
 
 
 @dataclass
@@ -32,20 +33,18 @@ class ProgressRouter:
     def __init__(
         self,
         *,
-        text_idle_seconds: float,
-        text_max_chars: int,
-        tool_idle_seconds: float,
-        tool_terminal_delay_seconds: float,
-        other_idle_seconds: float,
-        media_idle_seconds: float,
+        acp_config: ACPBackendConfig,
         publish: Callable[[str, dict[str, Any], str], Awaitable[None]],
     ) -> None:
-        self._text_idle_seconds = text_idle_seconds
-        self._text_max_chars = text_max_chars
-        self._tool_idle_seconds = tool_idle_seconds
-        self._tool_terminal_delay_seconds = tool_terminal_delay_seconds
-        self._other_idle_seconds = other_idle_seconds
-        self._media_idle_seconds = media_idle_seconds
+        # 中文注释：router 默认值直接跟随后端配置解析，避免调用方重复散落同一批 fallback 常量。
+        self._text_idle_seconds = float(getattr(acp_config, "progress_text_idle_seconds", 1.0))
+        self._text_max_chars = int(getattr(acp_config, "progress_text_max_chars", 2048))
+        self._tool_idle_seconds = float(getattr(acp_config, "progress_tool_idle_seconds", 300.0))
+        self._tool_terminal_delay_seconds = float(
+            getattr(acp_config, "progress_tool_terminal_delay_seconds", 1.5)
+        )
+        self._other_idle_seconds = float(getattr(acp_config, "progress_other_idle_seconds", 0.2))
+        self._media_idle_seconds = float(getattr(acp_config, "progress_media_idle_seconds", 0.2))
         self._publish = publish
 
         self._text_parts: list[str] = []
