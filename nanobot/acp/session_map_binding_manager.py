@@ -94,18 +94,19 @@ class _SessionMapBindingManager:
         session_id = raw.get("acpSideSessionId")
         updated_at = raw.get("updatedAt")
         revision = raw.get("revision")
-        bound_model = raw.get("boundModel")
-        bound_agent = raw.get("boundAgent")
+        # 中文注释：兼容旧字段 desiredModel/desiredAgent，读取时统一折叠到 bound*。
+        bound_model = raw.get("boundModel") or raw.get("desiredModel")
+        bound_agent = raw.get("boundAgent") or raw.get("desiredAgent")
         if not isinstance(cwd, str) or not cwd:
             raise ValueError("session map entry cwd is invalid")
         if not isinstance(session_key, str) or not session_key:
             raise ValueError("session map entry nanobotSideSessionKey is invalid")
         if not isinstance(session_id, str) or not session_id:
             raise ValueError("session map entry acpSideSessionId is invalid")
-        if not isinstance(updated_at, str) or not updated_at:
-            raise ValueError("session map entry updatedAt is invalid")
-        if not isinstance(revision, int) or revision < 1:
-            raise ValueError("session map entry revision is invalid")
+        normalized_updated_at = (
+            updated_at if isinstance(updated_at, str) and updated_at else _now_iso_with_tz()
+        )
+        normalized_revision = revision if isinstance(revision, int) and revision >= 1 else 1
         normalized_model = bound_model if isinstance(bound_model, str) and bound_model else None
         normalized_agent = bound_agent if isinstance(bound_agent, str) and bound_agent else None
         return _SessionMapBindingEntry(
@@ -114,23 +115,31 @@ class _SessionMapBindingManager:
             session_id=session_id,
             bound_model=normalized_model,
             bound_agent=normalized_agent,
-            updated_at=updated_at,
-            revision=revision,
+            updated_at=normalized_updated_at,
+            revision=normalized_revision,
         )
 
     def _read_payload_strict(self) -> dict[str, Any]:
         map_file = self._owner._session_map_file
         if not map_file.exists():
             return {"version": 2, "mappings": []}
-        payload = json.loads(map_file.read_text(encoding="utf-8"))
+        try:
+            payload = json.loads(map_file.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("session map read failed, fallback to empty payload error={}", exc)
+            return {"version": 2, "mappings": []}
         if not isinstance(payload, dict):
-            raise ValueError("session map payload must be object")
-        if payload.get("version") != 2:
-            raise ValueError("session map schema version must be 2")
+            logger.warning("session map payload is not object, fallback to empty payload")
+            return {"version": 2, "mappings": []}
+        version = payload.get("version")
+        if version not in {1, 2}:
+            logger.warning("session map schema version unsupported: {}, fallback empty", version)
+            return {"version": 2, "mappings": []}
         mappings = payload.get("mappings")
         if not isinstance(mappings, list):
-            raise ValueError("session map mappings must be list")
-        return payload
+            logger.warning("session map mappings is not list, fallback empty")
+            return {"version": 2, "mappings": []}
+        return {"version": 2, "mappings": mappings}
 
     def _load_entries_from_disk(self) -> dict[str, _SessionMapBindingEntry]:
         payload = self._read_payload_strict()
