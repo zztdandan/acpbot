@@ -12,6 +12,7 @@ from loguru import logger
 from nanobot.acp.acp_errors import _is_invalid_params_request_error
 from nanobot.acp.acp_factory import _acp_spawn_agent_process
 from nanobot.acp.client import _NanobotACPClient
+from nanobot.acp.progress_event_types import ACPProgressEvent
 from nanobot.acp.session_caps import _update_caps_from_session_payload
 from nanobot.acp.state import _ACPDispatchError, _SessionCapabilities, _StreamState
 from nanobot.bus.events import OutboundMessage
@@ -38,6 +39,7 @@ class _SessionRuntimePorts(Protocol):
     _session_active_tool_name: dict[str, str]
     _session_result_media: dict[str, list[str]]
     _session_pending_media: dict[str, list[str]]
+    _session_targets: dict[str, tuple[str, str, str]]
     _session_map_bootstrapped: bool
     _connection_epoch: int
     _session_activation_ensure_epoch: dict[str, int]
@@ -289,7 +291,8 @@ async def _process_direct_impl(
     chat_id: str = "direct",
     preferred_model: str | None = None,
     preferred_agent: str | None = None,
-    on_progress: Callable[[str], Awaitable[None]] | None = None,
+    on_progress: Callable[..., Awaitable[None]] | None = None,
+    on_progress_event: Callable[[ACPProgressEvent], Awaitable[None]] | None = None,
 ) -> OutboundMessage:
     """直接发送一轮 prompt 到指定 session，并返回标准 OutboundMessage。"""
     await _ensure_connection(runtime)
@@ -302,9 +305,24 @@ async def _process_direct_impl(
         preferred_agent=preferred_agent,
     )
     # 注册会话级流式状态，供 session_update 回调写入。
-    state = _StreamState(on_progress=on_progress)
+    progress_event_cb = on_progress_event
+    if progress_event_cb is None and on_progress is not None:
+        # 中文注释：兼容旧签名调用方（字符串 progress），把事件降级成文本回调。
+        async def _legacy_event_bridge(event: ACPProgressEvent) -> None:
+            text = ((event.raw_json or {}).get("content") or {}).get("text")
+            if isinstance(text, str) and text:
+                await on_progress(text)
+
+        progress_event_cb = _legacy_event_bridge
+
+    state = _StreamState(
+        on_progress_event=progress_event_cb,
+        dispatcher=runtime,
+        session_id=session_id,
+    )
     runtime._session_states[session_id] = state
     runtime._session_id_to_session_key[session_id] = session_key
+    runtime._session_targets[session_id] = (channel, chat_id, session_key)
     tracked_session_ids = {session_id}
     try:
         # 日志中对原文做转义和截断，避免污染终端。
@@ -356,6 +374,7 @@ async def _process_direct_impl(
                     tracked_session_ids.add(session_id)
                     runtime._session_states[session_id] = state
                     runtime._session_id_to_session_key[session_id] = session_key
+                    runtime._session_targets[session_id] = (channel, chat_id, session_key)
                     logger.warning(
                         "ACP prompt retry after connection closed session_key={} new_session_id={}",
                         session_key,
@@ -383,6 +402,7 @@ async def _process_direct_impl(
                     tracked_session_ids.add(session_id)
                     runtime._session_states[session_id] = state
                     runtime._session_id_to_session_key[session_id] = session_key
+                    runtime._session_targets[session_id] = (channel, chat_id, session_key)
                     logger.warning(
                         "ACP prompt retry with new session_key={} old_session_id={} new_session_id={}",
                         session_key,
@@ -416,7 +436,9 @@ async def _process_direct_impl(
         # 请求结束后清理 session 状态，避免跨请求串流。
         for tracked_session_id in tracked_session_ids:
             runtime._session_states.pop(tracked_session_id, None)
+            runtime._session_id_to_session_key.pop(tracked_session_id, None)
             runtime._session_active_tool_name.pop(tracked_session_id, None)
+            runtime._session_targets.pop(tracked_session_id, None)
 
 
 def _is_connection_closed_error(exc: Exception) -> bool:

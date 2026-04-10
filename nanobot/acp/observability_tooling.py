@@ -153,6 +153,29 @@ class _ACPObservabilityToolingMixin:
         reason: str,
         session_key: str,
     ) -> None:
+        metadata = dict(msg.metadata or {})
+        content_preview = msg.content.encode("unicode_escape", "ignore").decode("ascii")
+        if len(content_preview) > 320:
+            content_preview = f"{content_preview[:320]}..."
+        payload_size_bytes = len(
+            json.dumps(self._to_jsonable(metadata), ensure_ascii=False).encode("utf-8")
+        )
+        self._log_acp_json(
+            event="acp_outbound_ready",
+            payload={
+                "reason": reason,
+                "channel": msg.channel,
+                "chat_id": msg.chat_id,
+                "session_key": session_key,
+                "_acp_kind": metadata.get("_acp_kind"),
+                "_acp_session_id": metadata.get("_acp_session_id"),
+                "_acp_route_key": metadata.get("_acp_route_key"),
+                "_acp_flush_reason": metadata.get("_acp_flush_reason"),
+                "content_preview": content_preview,
+                "metadata_keys": sorted(metadata.keys()),
+                "payload_size_bytes": payload_size_bytes,
+            },
+        )
         self._log_acp_json(
             event="acp_outbound",
             payload=self._build_outbound_debug_payload(

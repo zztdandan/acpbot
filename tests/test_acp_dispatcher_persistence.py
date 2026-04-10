@@ -11,7 +11,6 @@ import pytest
 
 from nanobot.acp.dispatcher import ACPDispatcher
 from nanobot.acp.state import _StreamState
-from nanobot.acp.session_update_tool import _handle_tool_progress
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import ACPBackendConfig
@@ -948,21 +947,25 @@ async def test_tool_progress_completed_metadata_writes_outbound_media_file(
     dispatcher._session_states[session_id] = state
     dispatcher._session_active_tool_name[session_id] = "acp_send_file"
 
-    update = SimpleNamespace(
+    # 中文注释：新链路由 session_update_router 统一归一，不再直接调用旧 family handler。
+    from acp.helpers import update_tool_call
+
+    update = update_tool_call(
+        tool_call_id="tool-call-1",
         status="completed",
         title="acp_send_file",
-        rawOutput=SimpleNamespace(
-            metadata={
+        raw_output={
+            "metadata": {
                 "acp_send_file": {
                     "file": str(source),
                     "filename": "copied-doctor.txt",
                     "mime": "text/plain",
                 }
             }
-        ),
+        },
     )
 
-    await _handle_tool_progress(dispatcher, session_id, state, update)
+    await dispatcher._handle_session_update(session_id, update)
 
     media_paths = state.final_media()
     assert len(media_paths) == 1

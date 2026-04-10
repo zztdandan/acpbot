@@ -254,6 +254,13 @@ class ACPBackendConfig(Base):
     inbound_media_dir: str = "Download/channel-inbound/acp-dispatch"
     default_model: str = "xaio/Kimi-K2.5"
     default_mode: str = "OpenCode-Builder"
+    permission_timeout_seconds: int = 90
+    progress_text_idle_seconds: float = 1.0
+    progress_text_max_chars: int = 2048
+    progress_tool_idle_seconds: float = 300.0
+    progress_tool_terminal_delay_seconds: float = 1.5
+    progress_other_idle_seconds: float = 0.2
+    progress_media_idle_seconds: float = 0.2
 
 
 class DispatchConfig(Base):

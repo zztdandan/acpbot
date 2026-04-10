@@ -23,6 +23,7 @@ from nanobot.acp.acp_factory import (
 from nanobot.acp.dispatcher_dispatch import _dispatch_inbound
 from nanobot.acp.media_codec import _ACPFileTransportMixin
 from nanobot.acp.observability import _ACPObservabilityMixin
+from nanobot.acp.permission_bridge import PermissionBridge
 from nanobot.acp.session_caps import (
     _pick as session_caps_pick,
     _render_agents_command,
@@ -59,6 +60,7 @@ class ACPDispatcher(_ACPFileTransportMixin, _SessionMapSupport, _ACPObservabilit
     _process_locks: dict[str, asyncio.Lock]
     _session_states: dict[str, _StreamState]
     _session_caps: dict[str, _SessionCapabilities]
+    _session_desired: dict[str, dict[str, str | None]]
     _active_tasks: dict[str, list[asyncio.Task[Any]]]
     last_target: tuple[str, str] | None
     _session_map_file: Path
@@ -67,10 +69,12 @@ class ACPDispatcher(_ACPFileTransportMixin, _SessionMapSupport, _ACPObservabilit
     _session_active_tool_name: dict[str, str]
     _session_result_media: dict[str, list[str]]
     _session_pending_media: dict[str, list[str]]
+    _session_targets: dict[str, tuple[str, str, str]]
     _connection_epoch: int
     _session_activation_ensure_epoch: dict[str, int]
     _session_bootstrap_activated_keys: set[str]
     _session_map_binding_manager: _SessionMapBindingManager
+    _permission_bridge: PermissionBridge
 
     # ACP 模式下可用的 slash 命令帮助文本。
     _HELP_TEXT: ClassVar[str] = (
@@ -113,6 +117,7 @@ class ACPDispatcher(_ACPFileTransportMixin, _SessionMapSupport, _ACPObservabilit
         self._process_locks: dict[str, asyncio.Lock]
         self._session_states: dict[str, _StreamState]
         self._session_caps: dict[str, _SessionCapabilities]
+        self._session_desired: dict[str, dict[str, str | None]]
         self._active_tasks: dict[str, list[asyncio.Task[Any]]]
         self.last_target: tuple[str, str] | None
         self._session_map_file: Path
@@ -121,6 +126,7 @@ class ACPDispatcher(_ACPFileTransportMixin, _SessionMapSupport, _ACPObservabilit
         self._session_active_tool_name: dict[str, str]
         self._session_result_media: dict[str, list[str]]
         self._session_pending_media: dict[str, list[str]]
+        self._session_targets: dict[str, tuple[str, str, str]]
         self._connection_epoch: int
         self._session_activation_ensure_epoch: dict[str, int]
         self._session_bootstrap_activated_keys: set[str]
@@ -132,6 +138,7 @@ class ACPDispatcher(_ACPFileTransportMixin, _SessionMapSupport, _ACPObservabilit
         self._session_activation_ensure_epoch = {}
         # 中文注释：审计文件状态由可观测性 mixin 统一维护，避免主调度器继续膨胀。
         self._init_observability_state()
+        self._permission_bridge = PermissionBridge(self)
 
     @staticmethod
     def _pick(obj: Any, *names: str) -> Any:
@@ -216,40 +223,24 @@ class ACPDispatcher(_ACPFileTransportMixin, _SessionMapSupport, _ACPObservabilit
         tool_hint: bool = False,
         tool_event: dict[str, Any] | None = None,
     ) -> None:
-        """安全触发进度回调，兼容不同回调签名。"""
-        if not callback or not content:
-            return
-        try:
-            await callback(content, tool_hint=tool_hint, tool_event=tool_event)
-        except TypeError:
-            # 中文注释：兼容旧回调签名：先尝试 (content, tool_hint)，再降级到 (content)。
-            try:
-                await callback(content, tool_hint=tool_hint)
-            except TypeError:
-                await callback(content)
+        """兼容壳：旧 _emit_progress 链路已弃用，仅保留空实现以便迁移期观测。"""
+        del callback, content, tool_hint, tool_event
 
     async def _permission_response(self, options: list[Any]) -> Any:
-        """按配置策略构造 ACP 权限响应。"""
+        """兼容壳：权限决策已迁移到 permission bridge。"""
+        del options
         from acp.schema import RequestPermissionResponse
 
-        # strict: 全拒绝；trusted/yolo: 优先选 allow_always/allow_once。
-        policy = self.acp_config.permissions_policy
-        if policy == "strict":
-            return RequestPermissionResponse.model_validate({"outcome": {"outcome": "cancelled"}})
+        return RequestPermissionResponse.model_validate({"outcome": {"outcome": "cancelled"}})
 
-        preferred = "allow_always" if policy == "trusted" else "allow_once"
-        option_id = None
-        for option in options:
-            kind = getattr(option.kind, "value", option.kind)
-            if kind == preferred:
-                option_id = option.option_id
-                break
-        if option_id is None and options:
-            option_id = options[0].option_id
-        if option_id is None:
-            return RequestPermissionResponse.model_validate({"outcome": {"outcome": "cancelled"}})
-        return RequestPermissionResponse.model_validate(
-            {"outcome": {"outcome": "selected", "optionId": option_id}}
+    async def _request_permission_bridge(
+        self, *, options: list[Any], session_id: str, tool_call: Any
+    ) -> Any:
+        """通过 permission bridge 执行“请求上送 -> inbound 回填 -> ACP 回应”闭环。"""
+        return await self._permission_bridge.request_permission(
+            options=options,
+            session_id=session_id,
+            tool_call=tool_call,
         )
 
     async def _handle_session_update(self, session_id: str, update: Any) -> None:
@@ -299,7 +290,8 @@ class ACPDispatcher(_ACPFileTransportMixin, _SessionMapSupport, _ACPObservabilit
         chat_id: str = "direct",
         preferred_model: str | None = None,
         preferred_agent: str | None = None,
-        on_progress: Callable[[str], Awaitable[None]] | None = None,
+        on_progress: Callable[..., Awaitable[None]] | None = None,
+        on_progress_event: Callable[[Any], Awaitable[None]] | None = None,
     ) -> OutboundMessage:
         """直接发送一轮 prompt 到指定 session，并返回标准 OutboundMessage。"""
         return await _process_direct_impl(
@@ -311,6 +303,7 @@ class ACPDispatcher(_ACPFileTransportMixin, _SessionMapSupport, _ACPObservabilit
             preferred_model=preferred_model,
             preferred_agent=preferred_agent,
             on_progress=on_progress,
+            on_progress_event=on_progress_event,
         )
 
     async def _handle_stop(self, msg: InboundMessage) -> None:
@@ -373,5 +366,6 @@ class ACPDispatcher(_ACPFileTransportMixin, _SessionMapSupport, _ACPObservabilit
         self._proc = None
         self._session_map_bootstrapped = False
         self._session_map_binding_manager.mark_unbootstrapped()
+        await self._permission_bridge.close()
         # 中文注释：可观测性资源统一由 mixin 关闭，避免主流程混入文件句柄细节。
         self._close_observability()

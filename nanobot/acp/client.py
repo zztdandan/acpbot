@@ -17,9 +17,13 @@ class _NanobotACPClient:
         self.dispatcher = dispatcher
 
     async def request_permission(self, options, session_id, tool_call, **kwargs):
-        # 权限决策统一交由 dispatcher，根据配置策略返回 allow/cancel。
-        del session_id, tool_call, kwargs
-        return await self.dispatcher._permission_response(options)
+        # 中文注释：采用反向池模式：先上送 request，再等待 inbound 回执或超时。
+        del kwargs
+        return await self.dispatcher._request_permission_bridge(
+            options=options,
+            session_id=session_id,
+            tool_call=tool_call,
+        )
 
     async def session_update(self, session_id, update, **kwargs) -> None:
         # ACP 的增量事件（文本/tool 状态）交给 dispatcher 聚合处理。

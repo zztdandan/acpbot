@@ -8,7 +8,7 @@ from typing import Any, Awaitable, Protocol, cast
 from loguru import logger
 
 from nanobot.acp.dispatch_commands import _handle_slash_command
-from nanobot.acp.progress import _ProgressAccumulator
+from nanobot.acp.progress_router import ProgressRouter
 from nanobot.acp.state import _ACPDispatchError
 from nanobot.bus.events import InboundMessage, OutboundMessage
 
@@ -21,6 +21,8 @@ class _DispatcherFlowPorts(Protocol):
     _process_locks: dict[str, asyncio.Lock]
     _session_pending_media: dict[str, list[str]]
     _session_result_media: dict[str, list[str]]
+    _permission_bridge: Any
+    acp_config: Any
 
     @staticmethod
     def _parse_command(content: str) -> tuple[str, str]: ...
@@ -37,6 +39,7 @@ class _DispatcherFlowPorts(Protocol):
         preferred_model: str | None = None,
         preferred_agent: str | None = None,
         on_progress: Any = None,
+        on_progress_event: Any = None,
     ) -> OutboundMessage: ...
 
     async def _audit_inbound(self, *, msg: InboundMessage, session_key: str) -> None: ...
@@ -82,6 +85,10 @@ async def _dispatch_inbound(dispatcher: _DispatcherFlowPorts, msg: InboundMessag
             key = origin
 
         await dispatcher._audit_inbound(msg=msg, session_key=key)
+
+        # 中文注释：permission 回执必须在 session 锁外预消费，避免会话主流程等待 permission 时被同锁阻塞。
+        if await dispatcher._permission_bridge.try_consume_permission_reply(msg):
+            return
 
         # 中文注释：同一 session_key 下，slash 与常规 prompt 共用一把锁串行，
         # 防止 /new、/set_* 与普通对话并发时发生状态覆盖或脏写。
@@ -130,42 +137,82 @@ async def _dispatch_inbound(dispatcher: _DispatcherFlowPorts, msg: InboundMessag
             dispatch_error: _ACPDispatchError | None = None
             response_media: list[str] = []
 
-            async def _publish_progress(content: str, tool_hint: bool) -> None:
+            async def _publish_progress(
+                content: str, metadata: dict[str, Any], reason: str
+            ) -> None:
                 await dispatcher._publish_outbound_with_debug(
                     msg=OutboundMessage(
                         channel=msg.channel,
                         chat_id=msg.chat_id,
                         content=content,
-                        metadata={**progress_meta, "_tool_hint": tool_hint},
+                        metadata={**progress_meta, **metadata},
                     ),
-                    reason="progress_tool_hint" if tool_hint else "progress_text",
+                    reason=reason,
                     session_key=key,
                 )
 
-            progress_acc = _ProgressAccumulator(
-                idle_seconds=2.0,
-                tool_hint_publish_mode=(
-                    "immediate"
-                    if dispatcher.channels_config is None
-                    else dispatcher.channels_config.tool_hint_publish_mode
+            progress_router = ProgressRouter(
+                text_idle_seconds=float(
+                    getattr(dispatcher.acp_config, "progress_text_idle_seconds", 1.0)
                 ),
-                tool_hint_idle_seconds=(
-                    5.0
-                    if dispatcher.channels_config is None
-                    else dispatcher.channels_config.tool_hint_merge_idle_seconds
+                text_max_chars=int(getattr(dispatcher.acp_config, "progress_text_max_chars", 2048)),
+                tool_idle_seconds=float(
+                    getattr(dispatcher.acp_config, "progress_tool_idle_seconds", 300.0)
                 ),
-                tool_hint_payload_mode=(
-                    "array"
-                    if dispatcher.channels_config is None
-                    else dispatcher.channels_config.tool_hint_payload_mode
+                tool_terminal_delay_seconds=float(
+                    getattr(dispatcher.acp_config, "progress_tool_terminal_delay_seconds", 1.5)
                 ),
-                tool_hint_terminal_statuses=(
-                    ("completed", "failed")
-                    if dispatcher.channels_config is None
-                    else tuple(dispatcher.channels_config.tool_hint_terminal_statuses)
+                other_idle_seconds=float(
+                    getattr(dispatcher.acp_config, "progress_other_idle_seconds", 0.2)
+                ),
+                media_idle_seconds=float(
+                    getattr(dispatcher.acp_config, "progress_media_idle_seconds", 0.2)
                 ),
                 publish=_publish_progress,
             )
+
+            async def _on_progress_compat(
+                content: Any,
+                *,
+                tool_hint: bool = False,
+                tool_event: dict[str, Any] | None = None,
+            ) -> None:
+                # 中文注释：兼容旧测试/调用方直接推送字符串 progress，统一转成 ACPProgressEvent 再进入新路由。
+                from nanobot.acp.progress_event_types import ACPProgressEvent
+
+                if not isinstance(content, str) or not content:
+                    return
+                if tool_hint:
+                    raw_json = dict(tool_event or {})
+                    if "status" not in raw_json:
+                        raw_json["status"] = content
+                    if "toolCallId" not in raw_json:
+                        raw_json["toolCallId"] = (tool_event or {}).get(
+                            "tool_call_id"
+                        ) or "legacy-tool"
+                    event = ACPProgressEvent(
+                        session_id=key,
+                        raw_update=raw_json,
+                        raw_json=raw_json,
+                        update_type="ToolCallProgress",
+                        family="tool",
+                        route_key=str(
+                            raw_json.get("toolCallId") or raw_json.get("tool_call_id") or key
+                        ),
+                        extracted={"status": raw_json.get("status")},
+                    )
+                else:
+                    raw_json = {"content": {"text": content}}
+                    event = ACPProgressEvent(
+                        session_id=key,
+                        raw_update=raw_json,
+                        raw_json=raw_json,
+                        update_type="AgentMessageChunk",
+                        family="text",
+                        route_key=key,
+                    )
+                await progress_router.on_progress_event(event)
+
             try:
                 # 中文注释：当前轮附件先挂到 session_key，process_direct 再转换 ACP blocks。
                 dispatcher._session_pending_media[key] = list(msg.media or [])
@@ -176,7 +223,8 @@ async def _dispatch_inbound(dispatcher: _DispatcherFlowPorts, msg: InboundMessag
                     chat_id=msg.chat_id,
                     preferred_model=preferred_model,
                     preferred_agent=preferred_agent,
-                    on_progress=progress_acc.on_progress,
+                    on_progress=_on_progress_compat,
+                    on_progress_event=progress_router.on_progress_event,
                 )
             except _ACPDispatchError as exc:
                 dispatch_error = exc
@@ -184,7 +232,7 @@ async def _dispatch_inbound(dispatcher: _DispatcherFlowPorts, msg: InboundMessag
             finally:
                 dispatcher._session_pending_media.pop(key, None)
                 response_media = dispatcher._session_result_media.pop(key, [])
-                await progress_acc.close()
+                await progress_router.close()
 
             if dispatch_error is not None:
                 # ACP 异常时优先尝试输出 partial，减少用户感知中断。
@@ -209,7 +257,7 @@ async def _dispatch_inbound(dispatcher: _DispatcherFlowPorts, msg: InboundMessag
                                 media=response_media,
                                 metadata=dispatcher._sanitize_outbound_metadata(msg.metadata),
                             ),
-                            reason="final_partial",
+                            reason="final",
                             session_key=key,
                         )
                     return
@@ -231,7 +279,7 @@ async def _dispatch_inbound(dispatcher: _DispatcherFlowPorts, msg: InboundMessag
                         media=response.media or response_media,
                         metadata=final_metadata,
                     ),
-                    reason="final_response",
+                    reason="final",
                     session_key=key,
                 )
     except asyncio.CancelledError:

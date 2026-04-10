@@ -26,8 +26,8 @@
   - `acp_errors.py`：ACP 错误识别与兼容判断。
 
 - 五大家族
-  - `session_update_*`：事件路由与 text/media/tool 处理。
-  - `progress_*`：progress/tool_hint 聚合与发布策略。
+  - `session_update_router.py` + `session_update_events.py`：事件归一与统一入口分发。
+  - `progress_router.py` + `progress_event_types.py`：progress 多缓冲路由与发布策略。
   - `media_codec_*`：inbound/outbound 多媒体编解码。
   - `observability_*`：审计写盘与工具事件结构化。
   - `session_map_*`：会话映射持久化、对账与 heartbeat。
@@ -47,8 +47,8 @@
 
 ### 2) 五家族边界规则
 
-1. `session_update_*` 仅处理 ACP 增量事件到内部状态/进度桥接，不处理命令路由和连接初始化。
-2. `progress_*` 仅处理文本/tool_hint 聚合、节流与刷出策略，不解析 ACP update schema。
+1. `session_update` 家族仅处理 ACP 增量事件到内部状态/进度桥接，不处理命令路由和连接初始化。
+2. `progress` 家族仅处理文本/tool/media/other 聚合、节流与刷出策略，不解析连接与命令语义。
 3. `media_codec_*` 仅处理媒体内容在 ACP blocks 与本地文件间转换，不承担 session 编排。
 4. `observability_*` 仅处理调试/审计日志、工具事件结构化，不承担业务决策。
 5. `session_map_*` 仅处理 session map 的 load/persist/reconcile/heartbeat，不承担 prompt 主流程。
