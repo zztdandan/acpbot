@@ -171,48 +171,6 @@ async def _dispatch_inbound(dispatcher: _DispatcherFlowPorts, msg: InboundMessag
                 publish=_publish_progress,
             )
 
-            async def _on_progress_compat(
-                content: Any,
-                *,
-                tool_hint: bool = False,
-                tool_event: dict[str, Any] | None = None,
-            ) -> None:
-                # 中文注释：兼容旧测试/调用方直接推送字符串 progress，统一转成 ACPProgressEvent 再进入新路由。
-                from nanobot.acp.progress_event_types import ACPProgressEvent
-
-                if not isinstance(content, str) or not content:
-                    return
-                if tool_hint:
-                    raw_json = dict(tool_event or {})
-                    if "status" not in raw_json:
-                        raw_json["status"] = content
-                    if "toolCallId" not in raw_json:
-                        raw_json["toolCallId"] = (tool_event or {}).get(
-                            "tool_call_id"
-                        ) or "legacy-tool"
-                    event = ACPProgressEvent(
-                        session_id=key,
-                        raw_update=raw_json,
-                        raw_json=raw_json,
-                        update_type="ToolCallProgress",
-                        family="tool",
-                        route_key=str(
-                            raw_json.get("toolCallId") or raw_json.get("tool_call_id") or key
-                        ),
-                        extracted={"status": raw_json.get("status")},
-                    )
-                else:
-                    raw_json = {"content": {"text": content}}
-                    event = ACPProgressEvent(
-                        session_id=key,
-                        raw_update=raw_json,
-                        raw_json=raw_json,
-                        update_type="AgentMessageChunk",
-                        family="text",
-                        route_key=key,
-                    )
-                await progress_router.on_progress_event(event)
-
             try:
                 # 中文注释：当前轮附件先挂到 session_key，process_direct 再转换 ACP blocks。
                 dispatcher._session_pending_media[key] = list(msg.media or [])
@@ -223,7 +181,6 @@ async def _dispatch_inbound(dispatcher: _DispatcherFlowPorts, msg: InboundMessag
                     chat_id=msg.chat_id,
                     preferred_model=preferred_model,
                     preferred_agent=preferred_agent,
-                    on_progress=_on_progress_compat,
                     on_progress_event=progress_router.on_progress_event,
                 )
             except _ACPDispatchError as exc:

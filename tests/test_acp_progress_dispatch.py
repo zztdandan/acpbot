@@ -190,6 +190,53 @@ async def test_acp_text_flush_reason_never_uses_family_switch() -> None:
     assert text_progress.metadata.get("_acp_flush_reason") != "family_switch"
 
 
+@pytest.mark.asyncio
+async def test_dispatch_uses_event_callback_without_progress_compat() -> None:
+    bus = MessageBus()
+    dispatcher = ACPDispatcher(
+        bus=bus,
+        workspace=Path("/tmp"),
+        acp_config=ACPBackendConfig(progress_text_idle_seconds=0.01),
+        channels_config=ChannelsConfig(send_final=True),
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_process_direct(
+        content: str,
+        session_key: str = "cli:direct",
+        channel: str = "cli",
+        chat_id: str = "direct",
+        preferred_model: str | None = None,
+        preferred_agent: str | None = None,
+        on_progress=None,
+        on_progress_event=None,
+    ) -> str:
+        del content, session_key, channel, chat_id, preferred_model, preferred_agent
+        captured["on_progress"] = on_progress
+        captured["on_progress_event"] = on_progress_event
+        assert on_progress_event is not None
+        await on_progress_event(
+            ACPProgressEvent(
+                session_id="sess-4",
+                raw_update={"content": {"text": "compat-off"}},
+                raw_json={"content": {"text": "compat-off"}},
+                update_type="AgentMessageChunk",
+                family="text",
+                route_key="sess-4",
+            )
+        )
+        return "done"
+
+    dispatcher.process_direct = fake_process_direct  # type: ignore[method-assign]
+
+    await dispatcher._dispatch(
+        InboundMessage(channel="cli", sender_id="u", chat_id="c", content="run")
+    )
+
+    assert captured.get("on_progress") is None
+    assert captured.get("on_progress_event") is not None
+
+
 def test_channels_send_final_alias_parsing() -> None:
     cfg = ChannelsConfig.model_validate({"sendFinal": False})
     assert cfg.send_final is False
