@@ -71,6 +71,15 @@ Based on the current project docs (`docs/design`, `docs/issue`, `docs/research`,
 - `tool_call` context is not fully preserved for interactive approval UX.
 - Several `session/update` types (`agent_thought_chunk`, `plan`, `usage_update`, etc.) are not yet fully routed end-to-end.
 
+## Heartbeat Provider Config
+
+Heartbeat task decisions now use a dedicated provider configuration instead of sharing the main agent provider or ACP-specific shortcuts.
+
+- Scheduling remains under `gateway.heartbeat` (`enabled`, `intervalS`, `keepRecentMessages`).
+- Decision-time model selection lives under `heartbeat.providerConfig`.
+- `heartbeat.providerConfig.providers` reuses the same provider block structure as the main `providers` config, but it is isolated and does not fall back to the main provider pool.
+- Native and ACP both use the same heartbeat provider for the `skip/run` decision; execution still follows their existing runtime-specific paths.
+
 ## Roadmap
 
 ### Phase 1 - File transport real-chain closure (current)

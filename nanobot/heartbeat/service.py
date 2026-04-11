@@ -55,6 +55,7 @@ class HeartbeatService:
         workspace: Path,
         provider: LLMProvider,
         model: str,
+        provider_retry_mode: str = "standard",
         on_execute: Callable[[str], Coroutine[Any, Any, str]] | None = None,
         on_notify: Callable[[str], Coroutine[Any, Any, None]] | None = None,
         interval_s: int = 30 * 60,
@@ -64,6 +65,7 @@ class HeartbeatService:
         self.workspace = workspace
         self.provider = provider
         self.model = model
+        self.provider_retry_mode = provider_retry_mode
         self.on_execute = on_execute
         self.on_notify = on_notify
         self.interval_s = interval_s
@@ -93,15 +95,22 @@ class HeartbeatService:
 
         response = await self.provider.chat_with_retry(
             messages=[
-                {"role": "system", "content": "You are a heartbeat agent. Call the heartbeat tool to report your decision."},
-                {"role": "user", "content": (
-                    f"Current Time: {current_time_str(self.timezone)}\n\n"
-                    "Review the following HEARTBEAT.md and decide whether there are active tasks.\n\n"
-                    f"{content}"
-                )},
+                {
+                    "role": "system",
+                    "content": "You are a heartbeat agent. Call the heartbeat tool to report your decision.",
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Current Time: {current_time_str(self.timezone)}\n\n"
+                        "Review the following HEARTBEAT.md and decide whether there are active tasks.\n\n"
+                        f"{content}"
+                    ),
+                },
             ],
             tools=_HEARTBEAT_TOOL,
             model=self.model,
+            retry_mode=self.provider_retry_mode,
         )
 
         if not response.has_tool_calls:
@@ -166,7 +175,10 @@ class HeartbeatService:
 
                 if response:
                     should_notify = await evaluate_response(
-                        response, tasks, self.provider, self.model,
+                        response,
+                        tasks,
+                        self.provider,
+                        self.model,
                     )
                     if should_notify and self.on_notify:
                         logger.info("Heartbeat: completed, delivering response")

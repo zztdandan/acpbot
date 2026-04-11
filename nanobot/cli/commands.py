@@ -434,12 +434,43 @@ def _make_provider(config: Config):
 
     Routing is driven by ``ProviderSpec.backend`` in the registry.
     """
+    defaults = config.agents.defaults
+    return _make_provider_from_selection(
+        model=defaults.model,
+        provider_name=config.get_provider_name(defaults.model),
+        provider_config=config.get_provider(defaults.model),
+        api_base=config.get_api_base(defaults.model),
+        temperature=defaults.temperature,
+        max_tokens=defaults.max_tokens,
+        reasoning_effort=defaults.reasoning_effort,
+        missing_provider_hint="Set one in ~/.nanobot/config.json under providers section",
+        azure_provider_hint=(
+            "Set them in ~/.nanobot/config.json under providers.azure_openai section"
+        ),
+    )
+
+
+def _make_provider_from_selection(
+    *,
+    model: str,
+    provider_name: str | None,
+    provider_config,
+    api_base: str | None,
+    temperature: float,
+    max_tokens: int,
+    reasoning_effort: str | None,
+    missing_provider_hint: str,
+    azure_provider_hint: str,
+):
+    """Create an LLM provider from an already-resolved selection.
+
+    中文注释：gateway 主 provider 与 heartbeat 专用 provider 共用同一套实例化逻辑，
+    保证两条链路的 provider backend 与 generation 参数装配语义一致。
+    """
     from nanobot.providers.base import GenerationSettings
     from nanobot.providers.registry import find_by_name
 
-    model = config.agents.defaults.model
-    provider_name = config.get_provider_name(model)
-    p = config.get_provider(model)
+    p = provider_config
     spec = find_by_name(provider_name) if provider_name else None
     backend = spec.backend if spec else "openai_compat"
 
@@ -447,7 +478,7 @@ def _make_provider(config: Config):
     if backend == "azure_openai":
         if not p or not p.api_key or not p.api_base:
             console.print("[red]Error: Azure OpenAI requires api_key and api_base.[/red]")
-            console.print("Set them in ~/.nanobot/config.json under providers.azure_openai section")
+            console.print(azure_provider_hint)
             console.print("Use the model field to specify the deployment name.")
             raise typer.Exit(1)
     elif backend == "openai_compat" and not model.startswith("bedrock/"):
@@ -455,7 +486,7 @@ def _make_provider(config: Config):
         exempt = spec and (spec.is_oauth or spec.is_local or spec.is_direct)
         if needs_key and not exempt:
             console.print("[red]Error: No API key configured.[/red]")
-            console.print("Set one in ~/.nanobot/config.json under providers section")
+            console.print(missing_provider_hint)
             raise typer.Exit(1)
 
     # --- instantiation by backend ---
@@ -480,7 +511,7 @@ def _make_provider(config: Config):
 
         provider = AnthropicProvider(
             api_key=p.api_key if p else None,
-            api_base=config.get_api_base(model),
+            api_base=api_base,
             default_model=model,
             extra_headers=p.extra_headers if p else None,
         )
@@ -489,19 +520,39 @@ def _make_provider(config: Config):
 
         provider = OpenAICompatProvider(
             api_key=p.api_key if p else None,
-            api_base=config.get_api_base(model),
+            api_base=api_base,
             default_model=model,
             extra_headers=p.extra_headers if p else None,
             spec=spec,
         )
 
-    defaults = config.agents.defaults
     provider.generation = GenerationSettings(
-        temperature=defaults.temperature,
-        max_tokens=defaults.max_tokens,
-        reasoning_effort=defaults.reasoning_effort,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        reasoning_effort=reasoning_effort,
     )
     return provider
+
+
+def _make_heartbeat_provider(config: Config):
+    """Create the dedicated provider used only for heartbeat decisions."""
+    heartbeat_config = config.heartbeat.provider_config
+    model = heartbeat_config.model
+    return _make_provider_from_selection(
+        model=model,
+        provider_name=heartbeat_config.get_provider_name(model),
+        provider_config=heartbeat_config.get_provider(model),
+        api_base=heartbeat_config.get_api_base(model),
+        temperature=heartbeat_config.temperature,
+        max_tokens=heartbeat_config.max_tokens,
+        reasoning_effort=heartbeat_config.reasoning_effort,
+        missing_provider_hint=(
+            "Set one in ~/.nanobot/config.json under heartbeat.provider_config.providers section"
+        ),
+        azure_provider_hint=(
+            "Set them in ~/.nanobot/config.json under heartbeat.provider_config.providers.azure_openai section"
+        ),
+    )
 
 
 def _load_runtime_config(
@@ -692,7 +743,7 @@ def gateway(
     from nanobot.cron.service import CronService
     from nanobot.cron.types import CronJob
     from nanobot.heartbeat.service import HeartbeatService
-    from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+    from nanobot.providers.base import LLMProvider, LLMResponse
     from nanobot.session.manager import SessionManager
 
     class _DisabledHeartbeatProvider(LLMProvider):
@@ -711,40 +762,6 @@ def gateway(
 
         def get_default_model(self) -> str:
             return "disabled"
-
-    class _ACPHeartbeatProvider(LLMProvider):
-        async def chat(
-            self,
-            messages: list[dict[str, object]],
-            tools: list[dict[str, object]] | None = None,
-            model: str | None = None,
-            max_tokens: int = 4096,
-            temperature: float = 0.7,
-            reasoning_effort: str | None = None,
-            tool_choice: str | dict[str, object] | None = None,
-        ) -> LLMResponse:
-            del tools, model, max_tokens, temperature, reasoning_effort, tool_choice
-            user_content = ""
-            if messages:
-                raw = messages[-1].get("content", "")
-                if isinstance(raw, str):
-                    user_content = raw
-            heartbeat_tasks = (
-                user_content.split("\n\n", 1)[1] if "\n\n" in user_content else user_content
-            )
-            return LLMResponse(
-                content="",
-                tool_calls=[
-                    ToolCallRequest(
-                        id="hb_acp",
-                        name="heartbeat",
-                        arguments={"action": "run", "tasks": heartbeat_tasks},
-                    )
-                ],
-            )
-
-        def get_default_model(self) -> str:
-            return "acp-heartbeat"
 
     if verbose:
         import logging
@@ -893,21 +910,19 @@ def gateway(
         )
 
     hb_cfg = runtime_config.gateway.heartbeat
-    if runtime_config.dispatch.backend == "acp":
-        hb_enabled = hb_cfg.enabled
-        hb_provider: LLMProvider = _ACPHeartbeatProvider()
-    else:
-        hb_enabled = hb_cfg.enabled and provider is not None
-        if hb_cfg.enabled and provider is None:
-            console.print(
-                "[yellow]Warning: Heartbeat disabled because no provider is available.[/yellow]"
-            )
-        hb_provider = provider or _DisabledHeartbeatProvider()
+    heartbeat_provider_config = runtime_config.heartbeat.provider_config
+    hb_enabled = hb_cfg.enabled
+    hb_provider: LLMProvider = _DisabledHeartbeatProvider()
+    hb_model = heartbeat_provider_config.model
+    hb_provider_retry_mode = heartbeat_provider_config.provider_retry_mode
+    if hb_enabled:
+        hb_provider = _make_heartbeat_provider(runtime_config)
 
     heartbeat = HeartbeatService(
         workspace=runtime_config.workspace_path,
         provider=hb_provider,
-        model=runtime_config.agents.defaults.model,
+        model=hb_model,
+        provider_retry_mode=hb_provider_retry_mode,
         on_execute=on_heartbeat_execute,
         on_notify=(None if runtime_config.dispatch.backend == "acp" else on_heartbeat_notify),
         interval_s=hb_cfg.interval_s,

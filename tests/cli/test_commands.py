@@ -6,10 +6,11 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from click.exceptions import Exit as ClickExit
 from typer.testing import CliRunner
 
 from nanobot.bus.events import OutboundMessage
-from nanobot.cli.commands import _make_provider, app
+from nanobot.cli.commands import _make_heartbeat_provider, _make_provider, app
 from nanobot.config.schema import Config
 from nanobot.cron.types import CronJob, CronPayload
 from nanobot.providers.openai_codex_provider import _strip_model_prefix
@@ -25,10 +26,12 @@ class _StopGatewayError(RuntimeError):
 @pytest.fixture
 def mock_paths():
     """Mock config/workspace paths for test isolation."""
-    with patch("nanobot.config.loader.get_config_path") as mock_cp, \
-         patch("nanobot.config.loader.save_config") as mock_sc, \
-         patch("nanobot.config.loader.load_config") as mock_lc, \
-         patch("nanobot.cli.commands.get_workspace_path") as mock_ws:
+    with (
+        patch("nanobot.config.loader.get_config_path") as mock_cp,
+        patch("nanobot.config.loader.save_config") as mock_sc,
+        patch("nanobot.config.loader.load_config") as mock_lc,
+        patch("nanobot.cli.commands.get_workspace_path") as mock_ws,
+    ):
         base_dir = Path("./test_onboard_data")
         if base_dir.exists():
             shutil.rmtree(base_dir)
@@ -114,8 +117,8 @@ def test_onboard_existing_workspace_safe_create(mock_paths):
 
 def _strip_ansi(text):
     """Remove ANSI escape codes from text."""
-    ansi_escape = re.compile(r'\x1b\[[0-9;]*m')
-    return ansi_escape.sub('', text)
+    ansi_escape = re.compile(r"\x1b\[[0-9;]*m")
+    return ansi_escape.sub("", text)
 
 
 def test_onboard_help_shows_workspace_and_config_options():
@@ -360,10 +363,12 @@ async def test_github_copilot_provider_refreshes_client_api_key_before_chat():
 
     mock_client = MagicMock()
     mock_client.api_key = "no-key"
-    mock_client.chat.completions.create = AsyncMock(return_value={
-        "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
-        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-    })
+    mock_client.chat.completions.create = AsyncMock(
+        return_value={
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+    )
 
     with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI", return_value=mock_client):
         provider = GitHubCopilotProvider(default_model="github-copilot/gpt-5.1")
@@ -415,20 +420,110 @@ def test_make_provider_passes_extra_headers_to_custom_provider():
     assert kwargs["default_headers"]["x-session-affinity"] == "sticky-session"
 
 
+def test_heartbeat_provider_config_accepts_camel_case_and_uses_dedicated_pool():
+    config = Config.model_validate(
+        {
+            "providers": {
+                "openai": {
+                    "apiKey": "main-key",
+                }
+            },
+            "heartbeat": {
+                "providerConfig": {
+                    "provider": "custom",
+                    "model": "gpt-4o-mini",
+                    "providers": {
+                        "custom": {
+                            "apiKey": "heartbeat-key",
+                            "apiBase": "https://heartbeat.example/v1",
+                        }
+                    },
+                }
+            },
+        }
+    )
+
+    hb_cfg = config.heartbeat.provider_config
+    hb_provider = hb_cfg.get_provider()
+
+    assert hb_cfg.get_provider_name() == "custom"
+    assert hb_provider is not None
+    assert hb_provider.api_key == "heartbeat-key"
+    assert hb_cfg.get_api_base() == "https://heartbeat.example/v1"
+
+
+def test_make_heartbeat_provider_uses_heartbeat_provider_pool_only():
+    config = Config.model_validate(
+        {
+            "providers": {
+                "openai": {
+                    "apiKey": "main-key",
+                }
+            },
+            "heartbeat": {
+                "providerConfig": {
+                    "provider": "custom",
+                    "model": "gpt-4o-mini",
+                    "providers": {
+                        "custom": {
+                            "apiKey": "heartbeat-key",
+                            "apiBase": "https://heartbeat.example/v1",
+                            "extraHeaders": {
+                                "x-heartbeat": "true",
+                            },
+                        }
+                    },
+                }
+            },
+        }
+    )
+
+    with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI") as mock_async_openai:
+        _make_heartbeat_provider(config)
+
+    kwargs = mock_async_openai.call_args.kwargs
+    assert kwargs["api_key"] == "heartbeat-key"
+    assert kwargs["base_url"] == "https://heartbeat.example/v1"
+    assert kwargs["default_headers"]["x-heartbeat"] == "true"
+
+
+def test_make_heartbeat_provider_does_not_fallback_to_main_provider_pool():
+    config = Config.model_validate(
+        {
+            "providers": {
+                "openai": {
+                    "apiKey": "main-key",
+                }
+            },
+            "heartbeat": {
+                "providerConfig": {
+                    "provider": "openai",
+                    "model": "openai/gpt-4o-mini",
+                }
+            },
+        }
+    )
+
+    with pytest.raises(ClickExit):
+        _make_heartbeat_provider(config)
+
+
 @pytest.fixture
 def mock_agent_runtime(tmp_path):
     """Mock agent command dependencies for focused CLI tests."""
     config = Config()
     config.agents.defaults.workspace = str(tmp_path / "default-workspace")
 
-    with patch("nanobot.config.loader.load_config", return_value=config) as mock_load_config, \
-         patch("nanobot.config.loader.resolve_config_env_vars", side_effect=lambda c: c), \
-         patch("nanobot.cli.commands.sync_workspace_templates") as mock_sync_templates, \
-         patch("nanobot.cli.commands._make_provider", return_value=object()), \
-         patch("nanobot.cli.commands._print_agent_response") as mock_print_response, \
-         patch("nanobot.bus.queue.MessageBus"), \
-         patch("nanobot.cron.service.CronService"), \
-         patch("nanobot.agent.loop.AgentLoop") as mock_agent_loop_cls:
+    with (
+        patch("nanobot.config.loader.load_config", return_value=config) as mock_load_config,
+        patch("nanobot.config.loader.resolve_config_env_vars", side_effect=lambda c: c),
+        patch("nanobot.cli.commands.sync_workspace_templates") as mock_sync_templates,
+        patch("nanobot.cli.commands._make_provider", return_value=object()),
+        patch("nanobot.cli.commands._print_agent_response") as mock_print_response,
+        patch("nanobot.bus.queue.MessageBus"),
+        patch("nanobot.cron.service.CronService"),
+        patch("nanobot.agent.loop.AgentLoop") as mock_agent_loop_cls,
+    ):
         agent_loop = MagicMock()
         agent_loop.channels_config = None
         agent_loop.process_direct = AsyncMock(
@@ -471,7 +566,9 @@ def test_agent_uses_default_config_when_no_workspace_or_config_flags(mock_agent_
     )
     mock_agent_runtime["agent_loop"].process_direct.assert_awaited_once()
     mock_agent_runtime["print_response"].assert_called_once_with(
-        "mock-response", render_markdown=True, metadata={},
+        "mock-response",
+        render_markdown=True,
+        metadata={},
     )
 
 
@@ -514,7 +611,9 @@ def test_agent_config_sets_active_path(monkeypatch, tmp_path: Path) -> None:
             return None
 
     monkeypatch.setattr("nanobot.agent.loop.AgentLoop", _FakeAgentLoop)
-    monkeypatch.setattr("nanobot.cli.commands._print_agent_response", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        "nanobot.cli.commands._print_agent_response", lambda *_args, **_kwargs: None
+    )
 
     result = runner.invoke(app, ["agent", "-m", "hello", "-c", str(config_file)])
 
@@ -553,7 +652,9 @@ def test_agent_uses_workspace_directory_for_cron_store(monkeypatch, tmp_path: Pa
 
     monkeypatch.setattr("nanobot.cron.service.CronService", _FakeCron)
     monkeypatch.setattr("nanobot.agent.loop.AgentLoop", _FakeAgentLoop)
-    monkeypatch.setattr("nanobot.cli.commands._print_agent_response", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        "nanobot.cli.commands._print_agent_response", lambda *_args, **_kwargs: None
+    )
 
     result = runner.invoke(app, ["agent", "-m", "hello", "-c", str(config_file)])
 
@@ -561,9 +662,7 @@ def test_agent_uses_workspace_directory_for_cron_store(monkeypatch, tmp_path: Pa
     assert seen["cron_store"] == config.workspace_path / "cron" / "jobs.json"
 
 
-def test_agent_workspace_override_does_not_migrate_legacy_cron(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_agent_workspace_override_does_not_migrate_legacy_cron(monkeypatch, tmp_path: Path) -> None:
     config_file = tmp_path / "instance" / "config.json"
     config_file.parent.mkdir(parents=True)
     config_file.write_text("{}")
@@ -600,7 +699,9 @@ def test_agent_workspace_override_does_not_migrate_legacy_cron(
 
     monkeypatch.setattr("nanobot.cron.service.CronService", _FakeCron)
     monkeypatch.setattr("nanobot.agent.loop.AgentLoop", _FakeAgentLoop)
-    monkeypatch.setattr("nanobot.cli.commands._print_agent_response", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        "nanobot.cli.commands._print_agent_response", lambda *_args, **_kwargs: None
+    )
 
     result = runner.invoke(
         app,
@@ -728,6 +829,7 @@ def _patch_cli_command_runtime(
     set_config_path=None,
     sync_templates=None,
     make_provider=None,
+    make_heartbeat_provider=None,
     message_bus=None,
     session_manager=None,
     cron_service=None,
@@ -746,6 +848,10 @@ def _patch_cli_command_runtime(
     monkeypatch.setattr(
         "nanobot.cli.commands._make_provider",
         make_provider or (lambda _config: object()),
+    )
+    monkeypatch.setattr(
+        "nanobot.cli.commands._make_heartbeat_provider",
+        make_heartbeat_provider or (lambda _config: object()),
     )
 
     if message_bus is not None:
@@ -977,6 +1083,103 @@ def test_gateway_cron_evaluator_receives_scheduled_reminder_context(
     )
 
 
+def test_gateway_native_uses_dedicated_heartbeat_provider(monkeypatch, tmp_path: Path) -> None:
+    config_file = _write_instance_config(tmp_path)
+    config = Config()
+    config.agents.defaults.workspace = str(tmp_path / "config-workspace")
+    main_provider = object()
+    heartbeat_provider = object()
+    seen: dict[str, object] = {}
+
+    class _FakeCron:
+        def __init__(self, _store_path: Path) -> None:
+            self.on_job = None
+
+        def status(self) -> dict[str, object]:
+            return {"jobs": 0}
+
+    class _FakeChannelManager:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.enabled_channels = []
+
+    class _CaptureHeartbeat:
+        def __init__(self, **kwargs) -> None:
+            seen.update(kwargs)
+            raise _StopGatewayError("stop")
+
+    _patch_cli_command_runtime(
+        monkeypatch,
+        config,
+        make_provider=lambda _config: main_provider,
+        make_heartbeat_provider=lambda _config: heartbeat_provider,
+        message_bus=lambda: object(),
+        session_manager=lambda _workspace: object(),
+        cron_service=_FakeCron,
+    )
+    monkeypatch.setattr(
+        "nanobot.cli.acp_runtime.create_dispatch_runtime", lambda **_kwargs: object()
+    )
+    monkeypatch.setattr("nanobot.channels.manager.ChannelManager", _FakeChannelManager)
+    monkeypatch.setattr("nanobot.heartbeat.service.HeartbeatService", _CaptureHeartbeat)
+
+    result = runner.invoke(app, ["gateway", "--config", str(config_file)])
+
+    assert isinstance(result.exception, _StopGatewayError)
+    assert seen["provider"] is heartbeat_provider
+    assert seen["provider"] is not main_provider
+    assert seen["model"] == config.heartbeat.provider_config.model
+    assert seen["provider_retry_mode"] == config.heartbeat.provider_config.provider_retry_mode
+
+
+def test_gateway_acp_uses_dedicated_heartbeat_provider(monkeypatch, tmp_path: Path) -> None:
+    config_file = _write_instance_config(tmp_path)
+    config = Config()
+    config.dispatch.backend = "acp"
+    config.agents.defaults.workspace = str(tmp_path / "config-workspace")
+    heartbeat_provider = object()
+    seen: dict[str, object] = {}
+
+    class _FakeCron:
+        def __init__(self, _store_path: Path) -> None:
+            self.on_job = None
+
+        def status(self) -> dict[str, object]:
+            return {"jobs": 0}
+
+    class _FakeChannelManager:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.enabled_channels = []
+
+    class _CaptureHeartbeat:
+        def __init__(self, **kwargs) -> None:
+            seen.update(kwargs)
+            raise _StopGatewayError("stop")
+
+    _patch_cli_command_runtime(
+        monkeypatch,
+        config,
+        make_provider=lambda _config: (_ for _ in ()).throw(
+            AssertionError("main provider should not load")
+        ),
+        make_heartbeat_provider=lambda _config: heartbeat_provider,
+        message_bus=lambda: object(),
+        cron_service=_FakeCron,
+    )
+    monkeypatch.setattr(
+        "nanobot.cli.acp_runtime.create_dispatch_runtime", lambda **_kwargs: object()
+    )
+    monkeypatch.setattr("nanobot.channels.manager.ChannelManager", _FakeChannelManager)
+    monkeypatch.setattr("nanobot.heartbeat.service.HeartbeatService", _CaptureHeartbeat)
+
+    result = runner.invoke(app, ["gateway", "--config", str(config_file)])
+
+    assert isinstance(result.exception, _StopGatewayError)
+    assert seen["provider"] is heartbeat_provider
+    assert seen["model"] == config.heartbeat.provider_config.model
+    assert seen["provider_retry_mode"] == config.heartbeat.provider_config.provider_retry_mode
+    assert seen["on_notify"] is None
+
+
 def test_gateway_workspace_override_does_not_migrate_legacy_cron(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -1126,9 +1329,7 @@ def test_gateway_cli_port_overrides_configured_port(monkeypatch, tmp_path: Path)
     assert "port 18792" in result.stdout
 
 
-def test_serve_uses_api_config_defaults_and_workspace_override(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_serve_uses_api_config_defaults_and_workspace_override(monkeypatch, tmp_path: Path) -> None:
     config_file = _write_instance_config(tmp_path)
     config = Config()
     config.agents.defaults.workspace = str(tmp_path / "config-workspace")

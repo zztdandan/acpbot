@@ -1,4 +1,5 @@
 import asyncio
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -59,21 +60,40 @@ async def test_decide_returns_skip_when_no_tool_call(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_decide_uses_configured_provider_retry_mode(tmp_path) -> None:
+    provider = DummyProvider([])
+    provider.chat_with_retry = AsyncMock(return_value=LLMResponse(content="", tool_calls=[]))
+    service = HeartbeatService(
+        workspace=tmp_path,
+        provider=provider,
+        model="openai/gpt-4o-mini",
+        provider_retry_mode="persistent",
+    )
+
+    await service._decide("heartbeat content")
+
+    provider.chat_with_retry.assert_awaited_once()
+    assert provider.chat_with_retry.await_args.kwargs["retry_mode"] == "persistent"
+
+
+@pytest.mark.asyncio
 async def test_trigger_now_executes_when_decision_is_run(tmp_path) -> None:
     (tmp_path / "HEARTBEAT.md").write_text("- [ ] do thing", encoding="utf-8")
 
-    provider = DummyProvider([
-        LLMResponse(
-            content="",
-            tool_calls=[
-                ToolCallRequest(
-                    id="hb_1",
-                    name="heartbeat",
-                    arguments={"action": "run", "tasks": "check open tasks"},
-                )
-            ],
-        )
-    ])
+    provider = DummyProvider(
+        [
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="hb_1",
+                        name="heartbeat",
+                        arguments={"action": "run", "tasks": "check open tasks"},
+                    )
+                ],
+            )
+        ]
+    )
 
     called_with: list[str] = []
 
@@ -97,18 +117,20 @@ async def test_trigger_now_executes_when_decision_is_run(tmp_path) -> None:
 async def test_trigger_now_returns_none_when_decision_is_skip(tmp_path) -> None:
     (tmp_path / "HEARTBEAT.md").write_text("- [ ] do thing", encoding="utf-8")
 
-    provider = DummyProvider([
-        LLMResponse(
-            content="",
-            tool_calls=[
-                ToolCallRequest(
-                    id="hb_1",
-                    name="heartbeat",
-                    arguments={"action": "skip"},
-                )
-            ],
-        )
-    ])
+    provider = DummyProvider(
+        [
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="hb_1",
+                        name="heartbeat",
+                        arguments={"action": "skip"},
+                    )
+                ],
+            )
+        ]
+    )
 
     async def _on_execute(tasks: str) -> str:
         return tasks
@@ -128,18 +150,20 @@ async def test_tick_notifies_when_evaluator_says_yes(tmp_path, monkeypatch) -> N
     """Phase 1 run -> Phase 2 execute -> Phase 3 evaluate=notify -> on_notify called."""
     (tmp_path / "HEARTBEAT.md").write_text("- [ ] check deployments", encoding="utf-8")
 
-    provider = DummyProvider([
-        LLMResponse(
-            content="",
-            tool_calls=[
-                ToolCallRequest(
-                    id="hb_1",
-                    name="heartbeat",
-                    arguments={"action": "run", "tasks": "check deployments"},
-                )
-            ],
-        ),
-    ])
+    provider = DummyProvider(
+        [
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="hb_1",
+                        name="heartbeat",
+                        arguments={"action": "run", "tasks": "check deployments"},
+                    )
+                ],
+            ),
+        ]
+    )
 
     executed: list[str] = []
     notified: list[str] = []
@@ -174,18 +198,20 @@ async def test_tick_suppresses_when_evaluator_says_no(tmp_path, monkeypatch) -> 
     """Phase 1 run -> Phase 2 execute -> Phase 3 evaluate=silent -> on_notify NOT called."""
     (tmp_path / "HEARTBEAT.md").write_text("- [ ] check status", encoding="utf-8")
 
-    provider = DummyProvider([
-        LLMResponse(
-            content="",
-            tool_calls=[
-                ToolCallRequest(
-                    id="hb_1",
-                    name="heartbeat",
-                    arguments={"action": "run", "tasks": "check status"},
-                )
-            ],
-        ),
-    ])
+    provider = DummyProvider(
+        [
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="hb_1",
+                        name="heartbeat",
+                        arguments={"action": "run", "tasks": "check status"},
+                    )
+                ],
+            ),
+        ]
+    )
 
     executed: list[str] = []
     notified: list[str] = []
@@ -217,19 +243,21 @@ async def test_tick_suppresses_when_evaluator_says_no(tmp_path, monkeypatch) -> 
 
 @pytest.mark.asyncio
 async def test_decide_retries_transient_error_then_succeeds(tmp_path, monkeypatch) -> None:
-    provider = DummyProvider([
-        LLMResponse(content="429 rate limit", finish_reason="error"),
-        LLMResponse(
-            content="",
-            tool_calls=[
-                ToolCallRequest(
-                    id="hb_1",
-                    name="heartbeat",
-                    arguments={"action": "run", "tasks": "check open tasks"},
-                )
-            ],
-        ),
-    ])
+    provider = DummyProvider(
+        [
+            LLMResponse(content="429 rate limit", finish_reason="error"),
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="hb_1",
+                        name="heartbeat",
+                        arguments={"action": "run", "tasks": "check open tasks"},
+                    )
+                ],
+            ),
+        ]
+    )
 
     delays: list[int] = []
 
@@ -266,7 +294,8 @@ async def test_decide_prompt_includes_current_time(tmp_path) -> None:
                 content="",
                 tool_calls=[
                     ToolCallRequest(
-                        id="hb_1", name="heartbeat",
+                        id="hb_1",
+                        name="heartbeat",
                         arguments={"action": "skip"},
                     )
                 ],
@@ -286,4 +315,3 @@ async def test_decide_prompt_includes_current_time(tmp_path) -> None:
     user_msg = captured_messages[1]
     assert user_msg["role"] == "user"
     assert "Current Time:" in user_msg["content"]
-
