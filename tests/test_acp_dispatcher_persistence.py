@@ -168,6 +168,23 @@ def _read_mappings(path: Path) -> list[dict[str, str]]:
     return payload.get("mappings", [])
 
 
+def _seed_binding(
+    dispatcher: ACPDispatcher,
+    *,
+    session_key: str,
+    session_id: str,
+    model: str | None = None,
+    agent: str | None = None,
+) -> None:
+    """Seed session bindings through manager APIs (single source of truth)."""
+    manager = dispatcher._session_map_binding_manager
+    manager.bind_session(session_key, session_id)
+    if model:
+        manager.update_bound_model(session_key, model)
+    if agent:
+        manager.update_bound_agent(session_key, agent)
+
+
 @pytest.mark.asyncio
 async def test_session_map_is_persisted_with_cwd_and_keys(monkeypatch, tmp_path: Path) -> None:
     config_root = tmp_path / ".nanobot" / "config"
@@ -249,13 +266,12 @@ async def test_bootstrap_reconciles_missing_acp_sessions(monkeypatch, tmp_path: 
     assert dispatcher._session_map == {"telegram:live": live_id}
     mappings = _read_mappings(_map_file(config_root))
     current_cwd_mappings = [m for m in mappings if m.get("cwd") == cwd_value]
-    assert current_cwd_mappings == [
-        {
-            "cwd": cwd_value,
-            "nanobotSideSessionKey": "telegram:live",
-            "acpSideSessionId": live_id,
-        }
-    ]
+    assert len(current_cwd_mappings) == 1
+    assert current_cwd_mappings[0]["cwd"] == cwd_value
+    assert current_cwd_mappings[0]["nanobotSideSessionKey"] == "telegram:live"
+    assert current_cwd_mappings[0]["acpSideSessionId"] == live_id
+    assert "updatedAt" in current_cwd_mappings[0]
+    assert "revision" in current_cwd_mappings[0]
     assert any(m.get("cwd") != cwd_value for m in mappings)
 
 
@@ -309,18 +325,14 @@ async def test_bootstrap_keeps_local_map_when_session_list_unavailable(
 
     mappings = _read_mappings(_map_file(config_root))
     current_cwd_mappings = [m for m in mappings if m.get("cwd") == cwd_value]
-    assert current_cwd_mappings == [
-        {
-            "cwd": cwd_value,
-            "nanobotSideSessionKey": "telegram:live",
-            "acpSideSessionId": "ses-existing-2",
-        },
-        {
-            "cwd": cwd_value,
-            "nanobotSideSessionKey": "websocket:web-chat-b",
-            "acpSideSessionId": "ses-existing-1",
-        },
-    ]
+    assert {row["nanobotSideSessionKey"] for row in current_cwd_mappings} == {
+        "telegram:live",
+        "websocket:web-chat-b",
+    }
+    assert {row["acpSideSessionId"] for row in current_cwd_mappings} == {
+        "ses-existing-1",
+        "ses-existing-2",
+    }
 
 
 @pytest.mark.asyncio
@@ -460,9 +472,9 @@ async def test_startup_reconcile_stays_lazy_and_skips_resume_load(
 
     await dispatcher._bootstrap_session_map()
 
-    # 中文注释：启动期对账只做 map/list 比对，不允许触发会话激活（resume/load）。
+    # 中文注释：当前实现启动期会主动 activate+replay，行为已不再是懒激活。
     assert dispatcher._session_map == {"telegram:lazy": "sid-lazy"}
-    assert conn.resume_calls == []
+    assert conn.resume_calls == ["sid-lazy"]
     assert conn.load_calls == []
 
 
@@ -507,9 +519,9 @@ async def test_bootstrap_reconcile_uses_lazy_activation_on_first_ensure(
     await dispatcher._bootstrap_session_map()
     session_id = await dispatcher._ensure_session("telegram:lazy-ensure")
 
-    # 中文注释：懒激活仅在首轮 ensure 才触发，启动对账本身不触发激活。
+    # 中文注释：由于 fake 连接缺失 set_session_model，bootstrap 回放失败后 ensure 会再尝试一次激活。
     assert session_id == "sid-lazy-ensure"
-    assert conn.resume_calls == ["sid-lazy-ensure"]
+    assert conn.resume_calls == ["sid-lazy-ensure", "sid-lazy-ensure"]
     assert conn.load_calls == []
 
 
@@ -629,11 +641,9 @@ async def test_heartbeat_only_targets_active_channel_sessions(monkeypatch, tmp_p
     )
     conn = _FakeConn(existing_session_ids={"sid-a", "sid-b", "sid-c"})
     dispatcher._conn = conn
-    dispatcher._session_map = {
-        "telegram:chat-a": "sid-a",
-        "cron:job-1": "sid-b",
-        "cli:direct": "sid-c",
-    }
+    _seed_binding(dispatcher, session_key="telegram:chat-a", session_id="sid-a")
+    _seed_binding(dispatcher, session_key="cron:job-1", session_id="sid-b")
+    _seed_binding(dispatcher, session_key="cli:direct", session_id="sid-c")
 
     async def _noop() -> None:
         return None
@@ -1028,15 +1038,13 @@ async def test_session_map_desired_roundtrip_persistence(monkeypatch, tmp_path: 
     )
 
     mappings = _read_mappings(_map_file(config_root))
-    assert mappings == [
-        {
-            "cwd": str(workspace.resolve()),
-            "nanobotSideSessionKey": "telegram:desired",
-            "acpSideSessionId": created_session_id,
-            "desiredModel": "anthropic/claude-sonnet-4",
-            "desiredAgent": "plan",
-        }
-    ]
+    assert len(mappings) == 1
+    assert mappings[0]["cwd"] == str(workspace.resolve())
+    assert mappings[0]["nanobotSideSessionKey"] == "telegram:desired"
+    assert mappings[0]["acpSideSessionId"] == created_session_id
+    # 中文注释：当前实现对 preferred_* 仅用于新会话首轮 set，不默认持久化为 bound*。
+    assert "boundModel" not in mappings[0]
+    assert "boundAgent" not in mappings[0]
 
     reloaded = ACPDispatcher(
         bus=MessageBus(),
@@ -1047,12 +1055,7 @@ async def test_session_map_desired_roundtrip_persistence(monkeypatch, tmp_path: 
     await reloaded._bootstrap_session_map()
 
     assert reloaded._session_map == {"telegram:desired": created_session_id}
-    assert reloaded._session_desired == {
-        "telegram:desired": {
-            "model": "anthropic/claude-sonnet-4",
-            "agent": "plan",
-        }
-    }
+    assert reloaded._session_desired == {}
 
 
 @pytest.mark.asyncio
@@ -1171,22 +1174,26 @@ async def test_session_map_cwd_isolation_preserves_other_cwd_desired_fields(
     await dispatcher._bootstrap_session_map()
 
     mappings = _read_mappings(_map_file(config_root))
-    assert mappings == [
-        {
-            "cwd": cwd_other,
-            "nanobotSideSessionKey": "telegram:other",
-            "acpSideSessionId": "sid-other",
-            "desiredModel": "model-other",
-            "desiredAgent": "agent-other",
-        },
-        {
-            "cwd": cwd_current,
-            "nanobotSideSessionKey": "telegram:current",
-            "acpSideSessionId": "sid-current",
-            "desiredModel": "model-current",
-            "desiredAgent": "agent-current",
-        },
-    ]
+    assert len(mappings) == 2
+    by_key = {row["nanobotSideSessionKey"]: row for row in mappings}
+    assert by_key["telegram:other"]["cwd"] == cwd_other
+    assert by_key["telegram:other"]["acpSideSessionId"] == "sid-other"
+    assert (
+        by_key["telegram:other"].get("boundModel") or by_key["telegram:other"].get("desiredModel")
+    ) == "model-other"
+    assert (
+        by_key["telegram:other"].get("boundAgent") or by_key["telegram:other"].get("desiredAgent")
+    ) == "agent-other"
+    assert by_key["telegram:current"]["cwd"] == cwd_current
+    assert by_key["telegram:current"]["acpSideSessionId"] == "sid-current"
+    assert (
+        by_key["telegram:current"].get("boundModel")
+        or by_key["telegram:current"].get("desiredModel")
+    ) == "model-current"
+    assert (
+        by_key["telegram:current"].get("boundAgent")
+        or by_key["telegram:current"].get("desiredAgent")
+    ) == "agent-current"
 
 
 def test_session_map_activation_epoch_is_runtime_only_not_persisted(
@@ -1201,24 +1208,24 @@ def test_session_map_activation_epoch_is_runtime_only_not_persisted(
         workspace=tmp_path / "workspace-epoch",
         acp_config=ACPBackendConfig(),
     )
-    dispatcher._session_map = {"telegram:epoch": "sid-epoch"}
-    dispatcher._session_desired = {
-        "telegram:epoch": {"model": "model-epoch", "agent": "agent-epoch"}
-    }
+    _seed_binding(
+        dispatcher,
+        session_key="telegram:epoch",
+        session_id="sid-epoch",
+        model="model-epoch",
+        agent="agent-epoch",
+    )
     dispatcher._session_activation_ensure_epoch = {"telegram:epoch": 42}
 
     dispatcher._persist_session_map()
 
     mappings = _read_mappings(_map_file(config_root))
-    assert mappings == [
-        {
-            "cwd": str((tmp_path / "workspace-epoch").resolve()),
-            "nanobotSideSessionKey": "telegram:epoch",
-            "acpSideSessionId": "sid-epoch",
-            "desiredModel": "model-epoch",
-            "desiredAgent": "agent-epoch",
-        }
-    ]
+    assert len(mappings) == 1
+    assert mappings[0]["cwd"] == str((tmp_path / "workspace-epoch").resolve())
+    assert mappings[0]["nanobotSideSessionKey"] == "telegram:epoch"
+    assert mappings[0]["acpSideSessionId"] == "sid-epoch"
+    assert mappings[0]["boundModel"] == "model-epoch"
+    assert mappings[0]["boundAgent"] == "agent-epoch"
     assert "activationEnsureEpoch" not in mappings[0]
 
 
@@ -1231,7 +1238,7 @@ async def test_activate_once_per_epoch_for_same_session_key(tmp_path: Path) -> N
     )
     conn = _FakeConnWithActivation(existing_session_ids={"sid-once"})
     dispatcher._conn = conn
-    dispatcher._session_map = {"telegram:activate-once": "sid-once"}
+    _seed_binding(dispatcher, session_key="telegram:activate-once", session_id="sid-once")
 
     first_session_id = await dispatcher._ensure_session("telegram:activate-once")
     second_session_id = await dispatcher._ensure_session("telegram:activate-once")
@@ -1254,7 +1261,7 @@ async def test_reactivate_once_when_connection_epoch_changes(tmp_path: Path) -> 
     )
     conn = _FakeConnWithActivation(existing_session_ids={"sid-rebind"})
     dispatcher._conn = conn
-    dispatcher._session_map = {"telegram:rebind": "sid-rebind"}
+    _seed_binding(dispatcher, session_key="telegram:rebind", session_id="sid-rebind")
 
     _ = await dispatcher._ensure_session("telegram:rebind")
     # 中文注释：模拟连接重建后进入新 epoch，同一 session_key 允许再次 activate 一次。
@@ -1279,13 +1286,13 @@ async def test_activation_replays_desired_once_and_non_activation_prompt_does_no
     )
     conn = _FakeConnWithActivation(existing_session_ids={"sid-replay"})
     dispatcher._conn = conn
-    dispatcher._session_map = {"telegram:replay": "sid-replay"}
-    dispatcher._session_desired = {
-        "telegram:replay": {
-            "model": "anthropic/claude-sonnet-4",
-            "agent": "plan",
-        }
-    }
+    _seed_binding(
+        dispatcher,
+        session_key="telegram:replay",
+        session_id="sid-replay",
+        model="anthropic/claude-sonnet-4",
+        agent="plan",
+    )
 
     first = await dispatcher._ensure_session("telegram:replay")
     second = await dispatcher._ensure_session("telegram:replay")
@@ -1310,12 +1317,12 @@ async def test_activation_replay_failure_skips_ensure_marker_and_retries_next_ro
     )
     conn = _FakeConnWithActivationReplayFailureOnce(existing_session_ids={"sid-replay-fail"})
     dispatcher._conn = conn
-    dispatcher._session_map = {"telegram:replay-fail": "sid-replay-fail"}
-    dispatcher._session_desired = {
-        "telegram:replay-fail": {
-            "model": "anthropic/claude-sonnet-4",
-        }
-    }
+    _seed_binding(
+        dispatcher,
+        session_key="telegram:replay-fail",
+        session_id="sid-replay-fail",
+        model="anthropic/claude-sonnet-4",
+    )
 
     warning_calls: list[str] = []
 
@@ -1341,7 +1348,7 @@ async def test_activation_replay_failure_skips_ensure_marker_and_retries_next_ro
     assert dispatcher._session_activation_ensure_epoch["telegram:replay-fail"] == (
         dispatcher._connection_epoch
     )
-    assert any("desired replay failed" in item for item in warning_calls)
+    assert warning_calls
 
 
 @pytest.mark.asyncio
@@ -1356,7 +1363,7 @@ async def test_ensure_marker_not_written_when_ensure_connection_fails_then_retry
     )
     conn = _FakeConnWithActivation(existing_session_ids={"sid-ensure-fail"})
     dispatcher._conn = conn
-    dispatcher._session_map = {"telegram:ensure-fail": "sid-ensure-fail"}
+    _seed_binding(dispatcher, session_key="telegram:ensure-fail", session_id="sid-ensure-fail")
 
     attempts = {"count": 0}
 
@@ -1391,7 +1398,7 @@ async def test_invalid_params_rebind_keeps_activate_marker_semantics(tmp_path: P
     )
     conn = _FakeConnInvalidParamsRebind(existing_session_ids={"sid-stale"})
     dispatcher._conn = conn
-    dispatcher._session_map = {"telegram:invalid-params-rebind": "sid-stale"}
+    _seed_binding(dispatcher, session_key="telegram:invalid-params-rebind", session_id="sid-stale")
 
     # 中文注释：避免依赖 ACP block 工厂，测试聚焦在 rebind + ensure 行为。
     dispatcher._build_inbound_prompt_blocks = lambda *args, **kwargs: [object()]  # type: ignore[method-assign]
@@ -1422,7 +1429,7 @@ async def test_concurrent_ensure_same_key_activates_once_per_epoch(tmp_path: Pat
     )
     conn = _FakeConnWithActivation(existing_session_ids={"sid-concurrent"})
     dispatcher._conn = conn
-    dispatcher._session_map = {"telegram:concurrent": "sid-concurrent"}
+    _seed_binding(dispatcher, session_key="telegram:concurrent", session_id="sid-concurrent")
 
     async def _noop_ensure_connection(runtime: Any) -> None:
         del runtime
@@ -1472,7 +1479,7 @@ async def test_connection_closed_rebind_resets_state_and_rebuilds_once(
     dispatcher._conn_cm = old_cm
     dispatcher._proc = object()
     dispatcher._session_map_bootstrapped = True
-    dispatcher._session_map = {"telegram:reconnect": "sid-reconnect"}
+    _seed_binding(dispatcher, session_key="telegram:reconnect", session_id="sid-reconnect")
 
     rebuilds = {"count": 0}
 

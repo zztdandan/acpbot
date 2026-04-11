@@ -7,9 +7,10 @@ from typing import Any, Awaitable, Protocol, cast
 
 from loguru import logger
 
-from nanobot.acp.dispatch_commands import _handle_slash_command
+from nanobot.acp.dispatch_commands import pop_command_reason
 from nanobot.acp.state import _ACPDispatchError
 from nanobot.bus.events import InboundMessage, OutboundMessage
+from nanobot.command.router import CommandContext, CommandRouter
 
 
 class _DispatcherFlowPorts(Protocol):
@@ -23,6 +24,7 @@ class _DispatcherFlowPorts(Protocol):
     _session_progress_metadata: dict[str, dict[str, Any]]
     _permission_bridge: Any
     acp_config: Any
+    commands: CommandRouter
 
     @staticmethod
     def _parse_command(content: str) -> tuple[str, str]: ...
@@ -93,15 +95,32 @@ async def _dispatch_inbound(dispatcher: _DispatcherFlowPorts, msg: InboundMessag
         # 防止 /new、/set_* 与普通对话并发时发生状态覆盖或脏写。
         lock = dispatcher._process_locks.setdefault(key, asyncio.Lock())
         async with lock:
-            command, arg = dispatcher._parse_command(msg.content)
-            # 中文注释：slash 命令分支保持独立模块，主流程函数仅负责编排。
-            if await _handle_slash_command(
-                cast(Any, dispatcher),
-                msg=msg,
-                session_key=key,
-                command=command,
-                arg=arg,
-            ):
+            raw = msg.content.strip()
+            ctx = CommandContext(
+                msg=msg, session=None, key=key, raw=raw, loop=cast(Any, dispatcher)
+            )
+            if result := await dispatcher.commands.dispatch(ctx):
+                reason = pop_command_reason(result.metadata)
+                await dispatcher._publish_outbound_with_debug(
+                    msg=result,
+                    reason=reason,
+                    session_key=key,
+                )
+                return
+            if raw.startswith("/"):
+                command, _ = dispatcher._parse_command(raw)
+                # 中文注释：slash 未命中时显式回包，不再把未知命令透传给 process_direct。
+                await dispatcher._publish_outbound_with_debug(
+                    msg=OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content=(
+                            f"Unknown command: {command}\nUse /help to see available commands."
+                        ),
+                    ),
+                    reason="command_unknown",
+                    session_key=key,
+                )
                 return
 
             if msg.channel not in {"cli", "system"} and msg.chat_id:

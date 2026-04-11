@@ -1,5 +1,7 @@
 import asyncio
 import json
+import os
+import time
 
 import pytest
 
@@ -145,12 +147,14 @@ async def test_running_service_honors_external_disable(tmp_path) -> None:
 
 def test_remove_job_refuses_system_jobs(tmp_path) -> None:
     service = CronService(tmp_path / "cron" / "jobs.json")
-    service.register_system_job(CronJob(
-        id="dream",
-        name="dream",
-        schedule=CronSchedule(kind="cron", expr="0 */2 * * *", tz="UTC"),
-        payload=CronPayload(kind="system_event"),
-    ))
+    service.register_system_job(
+        CronJob(
+            id="dream",
+            name="dream",
+            schedule=CronSchedule(kind="cron", expr="0 */2 * * *", tz="UTC"),
+            payload=CronPayload(kind="system_event"),
+        )
+    )
 
     result = service.remove_job("dream")
 
@@ -175,6 +179,9 @@ def test_reload_jobs(tmp_path):
         schedule=CronSchedule(kind="every", every_ms=60_000),
         message="hello2",
     )
+    # Ensure mtime differs even on coarse filesystems so the first service reloads.
+    now = time.time()
+    os.utime(store_path, (now + 1, now + 1))
     assert len(service.list_jobs()) == 2
 
 

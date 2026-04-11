@@ -1,6 +1,8 @@
 """Tests for multi-provider web search."""
 
 import asyncio
+import sys
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -192,7 +194,9 @@ async def test_jina_422_falls_back_to_duckduckgo(monkeypatch):
             pass
 
         def text(self, query, max_results=5):
-            return [{"title": "Fallback", "href": "https://ddg.example", "body": "DuckDuckGo fallback"}]
+            return [
+                {"title": "Fallback", "href": "https://ddg.example", "body": "DuckDuckGo fallback"}
+            ]
 
     async def mock_get(self, url, **kw):
         assert "s.jina.ai" in str(url)
@@ -217,9 +221,11 @@ async def test_jina_search_uses_path_encoded_query(monkeypatch):
     async def mock_get(self, url, **kw):
         calls["url"] = str(url)
         calls["params"] = kw.get("params")
-        return _response(json={
-            "data": [{"title": "Jina Result", "url": "https://jina.ai", "content": "AI search"}]
-        })
+        return _response(
+            json={
+                "data": [{"title": "Jina Result", "url": "https://jina.ai", "content": "AI search"}]
+            }
+        )
 
     monkeypatch.setattr(httpx.AsyncClient, "get", mock_get)
     tool = _tool(provider="jina", api_key="jina-key")
@@ -232,6 +238,7 @@ async def test_jina_search_uses_path_encoded_query(monkeypatch):
 async def test_duckduckgo_timeout_returns_error(monkeypatch):
     """asyncio.wait_for guard should fire when DDG search hangs."""
     import threading
+
     gate = threading.Event()
 
     class HangingDDGS:
@@ -248,5 +255,3 @@ async def test_duckduckgo_timeout_returns_error(monkeypatch):
     result = await tool.execute(query="test")
     gate.set()
     assert "Error" in result
-
-
