@@ -12,9 +12,10 @@ from loguru import logger
 from nanobot.acp.acp_errors import _is_invalid_params_request_error
 from nanobot.acp.acp_factory import _acp_spawn_agent_process
 from nanobot.acp.client import _NanobotACPClient
-from nanobot.acp.progress_router import ProgressRouter
+from nanobot.acp.state.manager import SessionStateManager
+from nanobot.acp.state.router import ProgressRouter
 from nanobot.acp.session_caps import _update_caps_from_session_payload
-from nanobot.acp.state import _ACPDispatchError, _SessionCapabilities, _StreamState
+from nanobot.acp.state import _ACPDispatchError, _SessionCapabilities
 from nanobot.bus.events import OutboundMessage
 from nanobot.config.schema import ACPBackendConfig
 
@@ -35,7 +36,9 @@ class _SessionRuntimePorts(Protocol):
     _session_locks: dict[str, asyncio.Lock]
     _session_caps: dict[str, _SessionCapabilities]
     _session_map: dict[str, str]
-    _session_states: dict[str, _StreamState]
+    _session_states: dict[str, SessionStateManager]
+    _session_state_routers: dict[str, ProgressRouter]
+    _session_request_scope_ids: dict[str, str]
     _session_id_to_session_key: dict[str, str]
     _session_active_tool_name: dict[str, str]
     _session_result_media: dict[str, list[str]]
@@ -46,6 +49,7 @@ class _SessionRuntimePorts(Protocol):
     _connection_epoch: int
     _session_activation_ensure_epoch: dict[str, int]
     _session_bootstrap_activated_keys: set[str]
+    _session_state_manager: SessionStateManager
 
     async def _bootstrap_session_map(self) -> None: ...
 
@@ -342,17 +346,19 @@ async def _process_direct_impl(
                 # 中文注释：保留对旧式单参数 progress sink 的兼容，避免 direct 调用方被关键字参数打断。
                 await on_progress(content)
 
+    state_manager = getattr(runtime, "_session_state_manager", None)
+    if state_manager is None:
+        state_manager = SessionStateManager()
+        runtime._session_state_manager = state_manager
+
     progress_router = ProgressRouter(
         acp_config=runtime.acp_config,
+        manager=state_manager,
         publish=_publish_progress,
     )
-
-    state = _StreamState(
-        on_progress_event=progress_router.on_progress_event,
-        dispatcher=runtime,
-        session_id=session_id,
-    )
-    runtime._session_states[session_id] = state
+    runtime._session_states[session_id] = state_manager
+    runtime._session_state_routers[session_id] = progress_router
+    runtime._session_request_scope_ids[session_id] = session_key
     runtime._session_id_to_session_key[session_id] = session_key
     runtime._session_targets[session_id] = (channel, chat_id, session_key)
     tracked_session_ids = {session_id}
@@ -404,7 +410,9 @@ async def _process_direct_impl(
                         preferred_agent=preferred_agent,
                     )
                     tracked_session_ids.add(session_id)
-                    runtime._session_states[session_id] = state
+                    runtime._session_states[session_id] = state_manager
+                    runtime._session_state_routers[session_id] = progress_router
+                    runtime._session_request_scope_ids[session_id] = session_key
                     runtime._session_id_to_session_key[session_id] = session_key
                     runtime._session_targets[session_id] = (channel, chat_id, session_key)
                     logger.warning(
@@ -432,7 +440,9 @@ async def _process_direct_impl(
                         preferred_agent=preferred_agent,
                     )
                     tracked_session_ids.add(session_id)
-                    runtime._session_states[session_id] = state
+                    runtime._session_states[session_id] = state_manager
+                    runtime._session_state_routers[session_id] = progress_router
+                    runtime._session_request_scope_ids[session_id] = session_key
                     runtime._session_id_to_session_key[session_id] = session_key
                     runtime._session_targets[session_id] = (channel, chat_id, session_key)
                     logger.warning(
@@ -444,32 +454,43 @@ async def _process_direct_impl(
                     continue
 
                 # 如果 ACP 中断但已有部分文本，交给上层决定是否回退输出。
-                partial_esc = state.final().encode("unicode_escape", "ignore").decode("ascii")
+                request_state = state_manager.get_request_state(session_key)
+                partial_text = request_state.final_text if request_state is not None else ""
+                partial_esc = partial_text.encode("unicode_escape", "ignore").decode("ascii")
                 if len(partial_esc) > 320:
                     partial_esc = f"{partial_esc[:320]}..."
                 logger.warning(
                     "ACP prompt failed session_key={} session_id={} partial_chars={} partial_esc='{}'",
                     session_key,
                     session_id,
-                    len(state.final()),
+                    len(partial_text),
                     partial_esc,
                 )
-                raise _ACPDispatchError(partial_response=state.final()) from exc
+                raise _ACPDispatchError(partial_response=partial_text) from exc
+        request_state = state_manager.get_request_state(session_key)
+        response_text = request_state.final_text.strip() if request_state is not None else ""
+        response_media = list(request_state.media_paths) if request_state is not None else []
         return OutboundMessage(
             channel=channel,
             chat_id=chat_id,
-            content=state.final(),
-            media=state.final_media(),
+            content=response_text,
+            media=response_media,
             metadata={},
         )
     finally:
-        await progress_router.close()
+        for tracked_session_id in tracked_session_ids:
+            progress_router = runtime._session_state_routers.get(tracked_session_id)
+            if progress_router is not None:
+                await progress_router.close(tracked_session_id)
         runtime._session_pending_media.pop(session_key, None)
         runtime._session_progress_metadata.pop(session_key, None)
-        runtime._session_result_media[session_key] = state.final_media()
+        finalized_request_state = state_manager.finalize_request_scope(session_key)
+        runtime._session_result_media[session_key] = finalized_request_state.media_paths
         # 请求结束后清理 session 状态，避免跨请求串流。
         for tracked_session_id in tracked_session_ids:
             runtime._session_states.pop(tracked_session_id, None)
+            runtime._session_state_routers.pop(tracked_session_id, None)
+            runtime._session_request_scope_ids.pop(tracked_session_id, None)
             runtime._session_id_to_session_key.pop(tracked_session_id, None)
             runtime._session_active_tool_name.pop(tracked_session_id, None)
             runtime._session_targets.pop(tracked_session_id, None)

@@ -12,6 +12,7 @@ import time
 from typing import Any
 
 from nanobot.acp.progress_event_types import ACPProgressEvent
+from nanobot.acp.state import ACPUpdateType
 
 
 def _pick(obj: Any, *names: str) -> Any:
@@ -50,7 +51,39 @@ def _to_jsonable(update: Any) -> Any:
     return {"raw": str(update)}
 
 
-def _classify_family(update: Any, update_type: str) -> str:
+def _normalize_update_type(update: Any, raw_json: Any) -> ACPUpdateType:
+    session_update = _pick(raw_json, "sessionUpdate", "session_update")
+    raw_label = session_update or type(update).__name__
+    mapping = {
+        "user_message_chunk": ACPUpdateType.USER_MESSAGE_CHUNK,
+        "UserMessageChunk": ACPUpdateType.USER_MESSAGE_CHUNK,
+        "agent_message_chunk": ACPUpdateType.AGENT_MESSAGE_CHUNK,
+        "AgentMessageChunk": ACPUpdateType.AGENT_MESSAGE_CHUNK,
+        "agent_thought_chunk": ACPUpdateType.AGENT_THOUGHT_CHUNK,
+        "AgentThoughtChunk": ACPUpdateType.AGENT_THOUGHT_CHUNK,
+        "tool_call_start": ACPUpdateType.TOOL_CALL_START,
+        "ToolCallStart": ACPUpdateType.TOOL_CALL_START,
+        "tool_call_progress": ACPUpdateType.TOOL_CALL_PROGRESS,
+        "ToolCallProgress": ACPUpdateType.TOOL_CALL_PROGRESS,
+        "tool_call_update": ACPUpdateType.TOOL_CALL_UPDATE,
+        "ToolCallUpdate": ACPUpdateType.TOOL_CALL_UPDATE,
+        "agent_plan_update": ACPUpdateType.AGENT_PLAN_UPDATE,
+        "AgentPlanUpdate": ACPUpdateType.AGENT_PLAN_UPDATE,
+        "available_commands_update": ACPUpdateType.AVAILABLE_COMMANDS_UPDATE,
+        "AvailableCommandsUpdate": ACPUpdateType.AVAILABLE_COMMANDS_UPDATE,
+        "current_mode_update": ACPUpdateType.CURRENT_MODE_UPDATE,
+        "CurrentModeUpdate": ACPUpdateType.CURRENT_MODE_UPDATE,
+        "config_option_update": ACPUpdateType.CONFIG_OPTION_UPDATE,
+        "ConfigOptionUpdate": ACPUpdateType.CONFIG_OPTION_UPDATE,
+        "session_info_update": ACPUpdateType.SESSION_INFO_UPDATE,
+        "SessionInfoUpdate": ACPUpdateType.SESSION_INFO_UPDATE,
+        "usage_update": ACPUpdateType.USAGE_UPDATE,
+        "UsageUpdate": ACPUpdateType.USAGE_UPDATE,
+    }
+    return mapping.get(str(raw_label), ACPUpdateType.UNKNOWN)
+
+
+def _classify_family(update: Any, update_type: ACPUpdateType) -> str:
     """将 ACP update 归类到内部 family。
 
     family 用于后续 router 的分流与聚合，尽量贴合业务语义而非底层类型细节：
@@ -78,19 +111,25 @@ def _classify_family(update: Any, update_type: str) -> str:
         if isinstance(text, str):
             return "text"
         return "other"
-    if update_type in {"ToolCallStart", "ToolCallProgress", "ToolCallUpdate"}:
+    if update_type in {
+        ACPUpdateType.TOOL_CALL_START,
+        ACPUpdateType.TOOL_CALL_PROGRESS,
+        ACPUpdateType.TOOL_CALL_UPDATE,
+    }:
         return "tool"
-    if update_type == "UsageUpdate":
+    if update_type == ACPUpdateType.USAGE_UPDATE:
         return "usage"
-    if update_type == "AgentPlanUpdate":
+    if update_type == ACPUpdateType.AGENT_PLAN_UPDATE:
         return "plan"
     if update_type in {
-        "CurrentModeUpdate",
-        "ConfigOptionUpdate",
-        "AvailableCommandsUpdate",
-        "SessionInfoUpdate",
+        ACPUpdateType.CURRENT_MODE_UPDATE,
+        ACPUpdateType.CONFIG_OPTION_UPDATE,
+        ACPUpdateType.AVAILABLE_COMMANDS_UPDATE,
+        ACPUpdateType.SESSION_INFO_UPDATE,
     }:
         return "state"
+    if update_type == ACPUpdateType.AGENT_THOUGHT_CHUNK:
+        return "thought"
     return "other"
 
 
@@ -127,7 +166,7 @@ def to_progress_event(*, session_id: str, update: Any) -> ACPProgressEvent:
     """
 
     raw_json = _to_jsonable(update)
-    update_type = type(update).__name__
+    update_type = _normalize_update_type(update, raw_json)
     family = _classify_family(update, update_type)
     route_key = _build_route_key(session_id, family, raw_json)
     extracted = {

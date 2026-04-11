@@ -11,6 +11,7 @@ import pytest
 
 from nanobot.acp.dispatcher import ACPDispatcher
 from nanobot.acp.state import _StreamState
+from nanobot.acp.state.router import ProgressRouter
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import ACPBackendConfig
@@ -904,7 +905,13 @@ async def test_handle_session_update_resource_link_writes_outbound_media_file(
         acp_config=ACPBackendConfig(),
     )
     state_session = "session-1"
-    dispatcher._session_states[state_session] = _StreamState()
+    dispatcher._session_states[state_session] = dispatcher._session_state_manager
+    dispatcher._session_state_routers[state_session] = ProgressRouter(
+        acp_config=dispatcher.acp_config,
+        manager=dispatcher._session_state_manager,
+        publish=_noop_publish,
+    )
+    dispatcher._session_request_scope_ids[state_session] = state_session
 
     from acp.helpers import resource_link_block, update_agent_message
 
@@ -919,7 +926,9 @@ async def test_handle_session_update_resource_link_writes_outbound_media_file(
 
     await dispatcher._handle_session_update(state_session, update)
 
-    media_paths = dispatcher._session_states[state_session].final_media()
+    media_paths = dispatcher._session_state_manager.finalize_request_scope(
+        state_session
+    ).media_paths
     assert len(media_paths) == 1
     saved = Path(media_paths[0])
     assert saved.exists()
@@ -943,8 +952,13 @@ async def test_tool_progress_completed_metadata_writes_outbound_media_file(
         acp_config=ACPBackendConfig(),
     )
     session_id = "session-tool-1"
-    state = _StreamState()
-    dispatcher._session_states[session_id] = state
+    dispatcher._session_states[session_id] = dispatcher._session_state_manager
+    dispatcher._session_state_routers[session_id] = ProgressRouter(
+        acp_config=dispatcher.acp_config,
+        manager=dispatcher._session_state_manager,
+        publish=_noop_publish,
+    )
+    dispatcher._session_request_scope_ids[session_id] = session_id
     dispatcher._session_active_tool_name[session_id] = "acp_send_file"
 
     # 中文注释：新链路由 session_update_router 统一归一，不再直接调用旧 family handler。
@@ -967,7 +981,7 @@ async def test_tool_progress_completed_metadata_writes_outbound_media_file(
 
     await dispatcher._handle_session_update(session_id, update)
 
-    media_paths = state.final_media()
+    media_paths = dispatcher._session_state_manager.finalize_request_scope(session_id).media_paths
     assert len(media_paths) == 1
     saved = Path(media_paths[0])
     assert saved.exists()
@@ -1000,6 +1014,10 @@ def test_dispatcher_initializes_runtime_state_maps(monkeypatch, tmp_path: Path) 
     assert dispatcher._session_desired == {}
     assert dispatcher._session_activation_ensure_epoch == {}
     assert dispatcher._session_map_file == config_root / "acp-session-map.json"
+
+
+async def _noop_publish(content: str, metadata: dict[str, Any], reason: str) -> None:
+    del content, metadata, reason
 
 
 @pytest.mark.asyncio

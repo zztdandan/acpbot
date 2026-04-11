@@ -41,7 +41,7 @@ from nanobot.acp.session_runtime import (
 )
 from nanobot.acp.session_runtime_mcp import _convert_mcp_servers
 from nanobot.acp.dispatcher_state import _init_dispatcher_state
-from nanobot.acp.state import _SessionCapabilities, _StreamState
+from nanobot.acp.state import SessionStateManager, _SessionCapabilities, _StreamState
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import ACPBackendConfig, ChannelsConfig, MCPServerConfig
@@ -59,6 +59,9 @@ class ACPDispatcher(_ACPFileTransportMixin, _SessionMapSupport, _ACPObservabilit
     _session_locks: dict[str, asyncio.Lock]
     _process_locks: dict[str, asyncio.Lock]
     _session_states: dict[str, _StreamState]
+    _session_state_routers: dict[str, Any]
+    _session_request_scope_ids: dict[str, str]
+    _session_state_manager: SessionStateManager
     _session_caps: dict[str, _SessionCapabilities]
     _session_desired: dict[str, dict[str, str | None]]
     _active_tasks: dict[str, list[asyncio.Task[Any]]]
@@ -117,6 +120,9 @@ class ACPDispatcher(_ACPFileTransportMixin, _SessionMapSupport, _ACPObservabilit
         self._session_locks: dict[str, asyncio.Lock]
         self._process_locks: dict[str, asyncio.Lock]
         self._session_states: dict[str, _StreamState]
+        self._session_state_routers: dict[str, Any]
+        self._session_request_scope_ids: dict[str, str]
+        self._session_state_manager: SessionStateManager
         self._session_caps: dict[str, _SessionCapabilities]
         self._session_desired: dict[str, dict[str, str | None]]
         self._active_tasks: dict[str, list[asyncio.Task[Any]]]

@@ -6,6 +6,15 @@ from typing import Any
 
 import pytest
 
+from nanobot.acp.state import ACPUpdateType, SessionStateManager
+from nanobot.acp.state.handlers.other import OtherHandler
+from nanobot.acp.state.handlers.permission import PermissionHandler
+from nanobot.acp.state.permission_events import (
+    PermissionReplyEvent,
+    PermissionRequestEvent,
+    PermissionTimeoutEvent,
+)
+from nanobot.acp.state.router import HandlerRegistry
 from nanobot.acp.permission_bridge import PermissionBridge
 from nanobot.bus.events import InboundMessage
 
@@ -121,3 +130,62 @@ async def test_permission_bridge_timeout_returns_cancelled() -> None:
     assert result.outcome.outcome == "cancelled"
     assert any(reason == "permission_timeout" for reason, _ in dispatcher.published)
     assert bridge._pending == {}
+
+
+@pytest.mark.asyncio
+async def test_permission_handler_receives_manual_request_reply_timeout_events() -> None:
+    dispatcher = _FakeDispatcher(timeout_seconds=3)
+    manager = SessionStateManager()
+    handler = PermissionHandler(dispatcher=dispatcher, manager=manager)
+
+    request_task = asyncio.create_task(
+        handler.handle_request(
+            PermissionRequestEvent(
+                options=_options(),
+                session_id="sid-1",
+                tool_call=SimpleNamespace(tool_call_id="t-manual"),
+            )
+        )
+    )
+    await asyncio.sleep(0.05)
+    consumed = await handler.handle_reply(
+        PermissionReplyEvent(
+            session_id="sid-1",
+            request_id="t-manual",
+            token="allow_once",
+            source="metadata",
+            session_key="websocket:chat",
+        )
+    )
+
+    result = await asyncio.wait_for(request_task, timeout=1.0)
+    assert consumed is True
+    assert result.outcome.outcome == "selected"
+    assert result.outcome.option_id == "allow_once"
+
+    timeout_task = asyncio.create_task(
+        handler.handle_request(
+            PermissionRequestEvent(
+                options=_options(),
+                session_id="sid-1",
+                tool_call=SimpleNamespace(tool_call_id="t-timeout-manual"),
+            )
+        )
+    )
+    await asyncio.sleep(0.05)
+    await handler.handle_timeout(
+        PermissionTimeoutEvent(session_id="sid-1", request_id="t-timeout-manual")
+    )
+
+    timeout_result = await asyncio.wait_for(timeout_task, timeout=1.0)
+    assert timeout_result.outcome.outcome == "cancelled"
+    assert manager.iter_pools_for_session(session_id="sid-1") == []
+
+
+def test_permission_events_do_not_use_auto_update_registry() -> None:
+    registry = HandlerRegistry(
+        handlers=[PermissionHandler(dispatcher=_FakeDispatcher(), manager=SessionStateManager())],
+        fallback_handler=OtherHandler(),
+    )
+
+    assert registry.handlers_for(ACPUpdateType.UNKNOWN) == []

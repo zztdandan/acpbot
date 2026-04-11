@@ -8,6 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from nanobot.acp.state.models import ACPUpdateType
+
 
 @dataclass(slots=True)
 class ACPProgressEvent:
@@ -20,7 +22,7 @@ class ACPProgressEvent:
     session_id: str
     raw_update: Any
     raw_json: Any
-    update_type: str
+    update_type: ACPUpdateType | str
     family: str
     route_key: str
     extracted: dict[str, Any] = field(default_factory=dict)
