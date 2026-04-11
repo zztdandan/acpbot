@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from nanobot.acp.state import SessionStateManager
+
 
 def _init_dispatcher_state(dispatcher: Any) -> None:
     """初始化 ACPDispatcher 的运行时可变状态。"""
@@ -18,6 +20,9 @@ def _init_dispatcher_state(dispatcher: Any) -> None:
     dispatcher._session_locks = {}
     dispatcher._process_locks = {}
     dispatcher._session_states = {}
+    dispatcher._session_state_routers = {}
+    dispatcher._session_request_scope_ids = {}
+    dispatcher._session_state_manager = SessionStateManager()
     dispatcher._session_caps = {}
     # 中文注释：session_key 级别记录期望模型/agent，用于重启后 session map 回放。
     dispatcher._session_desired = {}
