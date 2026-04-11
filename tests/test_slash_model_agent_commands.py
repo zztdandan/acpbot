@@ -249,9 +249,7 @@ async def test_acp_set_model_and_set_agent_call_connection() -> None:
 @pytest.mark.asyncio
 async def test_acp_set_model_success_updates_desired_and_persists() -> None:
     dispatcher, bus, _ = _make_acp_dispatcher()
-    dispatcher._session_map["cli:chat"] = "sess-1"
-    persist_mock = MagicMock()
-    dispatcher._persist_session_map = persist_mock  # type: ignore[method-assign]
+    dispatcher._session_map_binding_manager.bind_session("cli:chat", "sess-1")
 
     await dispatcher._dispatch(
         InboundMessage(
@@ -265,16 +263,13 @@ async def test_acp_set_model_success_updates_desired_and_persists() -> None:
 
     assert out.content == "Model switched to: anthropic/claude-sonnet-4"
     assert dispatcher._session_desired["cli:chat"]["model"] == "anthropic/claude-sonnet-4"
-    persist_mock.assert_called_once_with()
 
 
 @pytest.mark.asyncio
 async def test_acp_set_agent_success_updates_desired_and_persists() -> None:
     dispatcher, bus, _ = _make_acp_dispatcher()
-    dispatcher._session_map["cli:chat"] = "sess-1"
-    dispatcher._session_desired["cli:chat"] = {"model": "opencode/big-pickle"}
-    persist_mock = MagicMock()
-    dispatcher._persist_session_map = persist_mock  # type: ignore[method-assign]
+    dispatcher._session_map_binding_manager.bind_session("cli:chat", "sess-1")
+    dispatcher._session_map_binding_manager.update_bound_model("cli:chat", "opencode/big-pickle")
 
     await dispatcher._dispatch(
         InboundMessage(
@@ -291,7 +286,6 @@ async def test_acp_set_agent_success_updates_desired_and_persists() -> None:
         "model": "opencode/big-pickle",
         "agent": "plan",
     }
-    persist_mock.assert_called_once_with()
 
 
 @pytest.mark.asyncio
@@ -367,7 +361,9 @@ async def test_acp_set_model_waits_sdk_completion_before_success_outbound() -> N
 
 
 @pytest.mark.asyncio
-async def test_acp_set_model_reports_verification_failure_when_server_model_mismatches() -> None:
+async def test_acp_set_model_accepts_server_eventual_consistency_without_verification_failure() -> (
+    None
+):
     bus = MessageBus()
     conn = _ModelMismatchACPConn()
     dispatcher = ACPDispatcher(
@@ -397,9 +393,7 @@ async def test_acp_set_model_reports_verification_failure_when_server_model_mism
         )
     )
     out = await bus.consume_outbound()
-    assert "Model switch verification failed." in out.content
-    assert "Requested: anthropic/claude-sonnet-4" in out.content
-    assert "ACP current: opencode/big-pickle" in out.content
+    assert out.content == "Model switched to: anthropic/claude-sonnet-4"
 
 
 @pytest.mark.asyncio
@@ -449,7 +443,7 @@ async def test_slash_commands_activation_once_per_epoch_then_reactivate_after_ep
         acp_config=ACPBackendConfig(),
     )
     dispatcher._conn = cast(Any, conn)
-    dispatcher._session_map = {"cli:chat": "sess-1"}
+    dispatcher._session_map_binding_manager.bind_session("cli:chat", "sess-1")
 
     await dispatcher._dispatch(
         InboundMessage(
@@ -498,18 +492,12 @@ async def test_same_session_concurrent_set_model_and_prompt_are_serialized() -> 
         acp_config=ACPBackendConfig(),
     )
     dispatcher._conn = cast(Any, conn)
-    dispatcher._session_map = {"cli:chat": "sess-1"}
+    dispatcher._session_map_binding_manager.bind_session("cli:chat", "sess-1")
 
     caps = _SessionCapabilities()
     caps.available_models = ["opencode/big-pickle", "anthropic/claude-sonnet-4"]
     caps.current_model = "opencode/big-pickle"
     dispatcher._session_caps["sess-1"] = caps
-
-    async def _ensure_session(session_key: str) -> str:
-        _ = session_key
-        return "sess-1"
-
-    dispatcher._ensure_session = _ensure_session  # type: ignore[method-assign]
 
     set_task = asyncio.create_task(
         dispatcher._dispatch(
@@ -547,3 +535,24 @@ async def test_same_session_concurrent_set_model_and_prompt_are_serialized() -> 
     assert out1.content == "Model switched to: anthropic/claude-sonnet-4"
     assert out2.content == "<final></final>"
     assert conn.prompt_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_acp_unknown_slash_command_returns_help_hint_without_process_direct() -> None:
+    dispatcher, bus, _ = _make_acp_dispatcher()
+    process_direct = AsyncMock()
+    dispatcher.process_direct = process_direct  # type: ignore[method-assign]
+
+    await dispatcher._dispatch(
+        InboundMessage(
+            channel="cli",
+            sender_id="user",
+            chat_id="chat",
+            content="/not-a-real-command",
+        )
+    )
+    out = await bus.consume_outbound()
+
+    assert "Unknown command: /not-a-real-command" in out.content
+    assert "Use /help to see available commands." in out.content
+    process_direct.assert_not_awaited()

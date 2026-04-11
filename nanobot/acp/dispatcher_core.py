@@ -20,6 +20,7 @@ from nanobot.acp.acp_factory import (
     _acp_resource_link_block,
     _acp_text_block,
 )
+from nanobot.acp.dispatch_commands import register_acp_builtin_commands
 from nanobot.acp.dispatcher_dispatch import _dispatch_inbound
 from nanobot.acp.media_codec import _ACPFileTransportMixin
 from nanobot.acp.observability import _ACPObservabilityMixin
@@ -44,6 +45,7 @@ from nanobot.acp.dispatcher_state import _init_dispatcher_state
 from nanobot.acp.state import _SessionCapabilities, _StreamState
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
+from nanobot.command.router import CommandRouter
 from nanobot.config.schema import ACPBackendConfig, ChannelsConfig, MCPServerConfig
 
 
@@ -76,6 +78,7 @@ class ACPDispatcher(_ACPFileTransportMixin, _SessionMapSupport, _ACPObservabilit
     _session_bootstrap_activated_keys: set[str]
     _session_map_binding_manager: _SessionMapBindingManager
     _permission_bridge: PermissionBridge
+    commands: CommandRouter
 
     # ACP 模式下可用的 slash 命令帮助文本。
     _HELP_TEXT: ClassVar[str] = (
@@ -133,7 +136,11 @@ class ACPDispatcher(_ACPFileTransportMixin, _SessionMapSupport, _ACPObservabilit
         self._session_activation_ensure_epoch: dict[str, int]
         self._session_bootstrap_activated_keys: set[str]
         self._session_map_binding_manager: _SessionMapBindingManager
+        self.commands: CommandRouter
         _init_dispatcher_state(self)
+        # 中文注释：ACP 命令采用与 native 一致的 CommandRouter 编制，减少双后端命令语义漂移。
+        self.commands = CommandRouter()
+        register_acp_builtin_commands(self, self.commands)
         # 中文注释：connection epoch 用于标记“当前稳定连接周期”，重连后递增，驱动会话重激活一次。
         self._connection_epoch = 0
         # 中文注释：记录 session_key 最近一次完成 ensure/activate 的 epoch，实现同一连接周期内去重。

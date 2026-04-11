@@ -175,6 +175,7 @@ _SEND_RETRY_BASE_DELAY = 0.5  # seconds, doubled each retry
 @dataclass
 class _StreamBuf:
     """Per-chat streaming accumulator for progressive message editing."""
+
     text: str = ""
     message_id: int | None = None
     last_edit: float = 0.0
@@ -312,13 +313,10 @@ class TelegramChannel(BaseChannel):
         self._app.add_handler(MessageHandler(filters.Regex(r"^/start(?:@\w+)?$"), self._on_start))
         self._app.add_handler(
             MessageHandler(
-                filters.Regex(r"^/(new|stop|restart|status|dream)(?:@\w+)?(?:\s+.*)?$"),
-                self._forward_command,
-            )
-        )
-        self._app.add_handler(
-            MessageHandler(
-                filters.Regex(r"^/(dream-log|dream_log|dream-restore|dream_restore)(?:@\w+)?(?:\s+.*)?$"),
+                # 中文注释：Telegram 仅本地处理 /start 与 /help，其余 slash 全部下传后端命令层。
+                filters.Regex(
+                    r"^/(?!start(?:@\w+)?$)(?!help(?:@\w+)?$)[A-Za-z0-9_]+(?:@\w+)?(?:\s+.*)?$"
+                ),
                 self._forward_command,
             )
         )
@@ -448,7 +446,13 @@ class TelegramChannel(BaseChannel):
                     "voice": self._app.bot.send_voice,
                     "audio": self._app.bot.send_audio,
                 }.get(media_type, self._app.bot.send_document)
-                param = "photo" if media_type == "photo" else media_type if media_type in ("voice", "audio") else "document"
+                param = (
+                    "photo"
+                    if media_type == "photo"
+                    else media_type
+                    if media_type in ("voice", "audio")
+                    else "document"
+                )
 
                 # Telegram Bot API accepts HTTP(S) URLs directly for media params.
                 if self._is_remote_media_url(media_path):
@@ -486,14 +490,17 @@ class TelegramChannel(BaseChannel):
             render_as_blockquote = bool(msg.metadata.get("_tool_hint"))
             for chunk in split_message(msg.content, TELEGRAM_MAX_MESSAGE_LEN):
                 await self._send_text(
-                    chat_id, chunk, reply_params, thread_kwargs,
+                    chat_id,
+                    chunk,
+                    reply_params,
+                    thread_kwargs,
                     render_as_blockquote=render_as_blockquote,
                 )
 
     async def _call_with_retry(self, fn, *args, **kwargs):
         """Call an async Telegram API function with retry on pool/network timeout and RetryAfter."""
         from telegram.error import RetryAfter
-        
+
         for attempt in range(1, _SEND_MAX_RETRIES + 1):
             try:
                 return await fn(*args, **kwargs)
@@ -503,7 +510,9 @@ class TelegramChannel(BaseChannel):
                 delay = _SEND_RETRY_BASE_DELAY * (2 ** (attempt - 1))
                 logger.warning(
                     "Telegram timeout (attempt {}/{}), retrying in {:.1f}s",
-                    attempt, _SEND_MAX_RETRIES, delay,
+                    attempt,
+                    _SEND_MAX_RETRIES,
+                    delay,
                 )
                 await asyncio.sleep(delay)
             except RetryAfter as e:
@@ -512,7 +521,9 @@ class TelegramChannel(BaseChannel):
                 delay = float(e.retry_after)
                 logger.warning(
                     "Telegram Flood Control (attempt {}/{}), retrying in {:.1f}s",
-                    attempt, _SEND_MAX_RETRIES, delay,
+                    attempt,
+                    _SEND_MAX_RETRIES,
+                    delay,
                 )
                 await asyncio.sleep(delay)
 
@@ -526,10 +537,16 @@ class TelegramChannel(BaseChannel):
     ) -> None:
         """Send a plain text message with HTML fallback."""
         try:
-            html = _tool_hint_to_telegram_blockquote(text) if render_as_blockquote else _markdown_to_telegram_html(text)
+            html = (
+                _tool_hint_to_telegram_blockquote(text)
+                if render_as_blockquote
+                else _markdown_to_telegram_html(text)
+            )
             await self._call_with_retry(
                 self._app.bot.send_message,
-                chat_id=chat_id, text=html, parse_mode="HTML",
+                chat_id=chat_id,
+                text=html,
+                parse_mode="HTML",
                 reply_parameters=reply_params,
                 **(thread_kwargs or {}),
             )
@@ -551,7 +568,9 @@ class TelegramChannel(BaseChannel):
     def _is_not_modified_error(exc: Exception) -> bool:
         return isinstance(exc, BadRequest) and "message is not modified" in str(exc).lower()
 
-    async def send_delta(self, chat_id: str, delta: str, metadata: dict[str, Any] | None = None) -> None:
+    async def send_delta(
+        self, chat_id: str, delta: str, metadata: dict[str, Any] | None = None
+    ) -> None:
         """Progressive message editing: send on first delta, edit on subsequent ones."""
         if not self._app:
             return
@@ -577,8 +596,10 @@ class TelegramChannel(BaseChannel):
                 html = _markdown_to_telegram_html(primary_text)
                 await self._call_with_retry(
                     self._app.bot.edit_message_text,
-                    chat_id=int_chat_id, message_id=buf.message_id,
-                    text=html, parse_mode="HTML",
+                    chat_id=int_chat_id,
+                    message_id=buf.message_id,
+                    text=html,
+                    parse_mode="HTML",
                 )
             except Exception as e:
                 if self._is_not_modified_error(e):
@@ -589,7 +610,8 @@ class TelegramChannel(BaseChannel):
                 try:
                     await self._call_with_retry(
                         self._app.bot.edit_message_text,
-                        chat_id=int_chat_id, message_id=buf.message_id,
+                        chat_id=int_chat_id,
+                        message_id=buf.message_id,
                         text=primary_text,
                     )
                 except Exception as e2:
@@ -606,7 +628,9 @@ class TelegramChannel(BaseChannel):
             return
 
         buf = self._stream_bufs.get(chat_id)
-        if buf is None or (stream_id is not None and buf.stream_id is not None and buf.stream_id != stream_id):
+        if buf is None or (
+            stream_id is not None and buf.stream_id is not None and buf.stream_id != stream_id
+        ):
             buf = _StreamBuf(stream_id=stream_id)
             self._stream_bufs[chat_id] = buf
         elif buf.stream_id is None:
@@ -624,7 +648,8 @@ class TelegramChannel(BaseChannel):
             try:
                 sent = await self._call_with_retry(
                     self._app.bot.send_message,
-                    chat_id=int_chat_id, text=buf.text,
+                    chat_id=int_chat_id,
+                    text=buf.text,
                     **thread_kwargs,
                 )
                 buf.message_id = sent.message_id
@@ -636,7 +661,8 @@ class TelegramChannel(BaseChannel):
             try:
                 await self._call_with_retry(
                     self._app.bot.edit_message_text,
-                    chat_id=int_chat_id, message_id=buf.message_id,
+                    chat_id=int_chat_id,
+                    message_id=buf.message_id,
                     text=buf.text,
                 )
                 buf.last_edit = now
@@ -702,13 +728,13 @@ class TelegramChannel(BaseChannel):
         text = getattr(reply, "text", None) or getattr(reply, "caption", None) or ""
         if len(text) > TELEGRAM_REPLY_CONTEXT_MAX_LEN:
             text = text[:TELEGRAM_REPLY_CONTEXT_MAX_LEN] + "..."
-            
+
         if not text:
             return None
-            
+
         bot_id, _ = await self._ensure_bot_identity()
         reply_user = getattr(reply, "from_user", None)
-        
+
         if bot_id and reply_user and getattr(reply_user, "id", None) == bot_id:
             return f"[Reply to bot: {text}]"
         elif reply_user and getattr(reply_user, "username", None):
@@ -853,7 +879,7 @@ class TelegramChannel(BaseChannel):
         message = update.message
         user = update.effective_user
         self._remember_thread_context(message)
-        
+
         # Strip @bot_username suffix if present
         content = message.text or ""
         if content.startswith("/") and "@" in content:
@@ -861,7 +887,9 @@ class TelegramChannel(BaseChannel):
             cmd_part = cmd_part.split("@")[0]
             content = f"{cmd_part} {rest[0]}" if rest else cmd_part
         content = self._normalize_telegram_command(content)
-            
+        if content in {"/start", "/help"}:
+            return
+
         await self._handle_message(
             sender_id=self._sender_id(user),
             chat_id=str(message.chat_id),

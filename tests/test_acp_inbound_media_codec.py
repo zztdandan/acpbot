@@ -74,6 +74,8 @@ def test_build_inbound_prompt_blocks_accepts_file_uri_inside_workspace(tmp_path:
 def test_build_inbound_prompt_blocks_drops_missing_or_external_media_and_logs_error(
     tmp_path: Path,
 ) -> None:
+    # 中文注释：CLI 测试会全局 disable("nanobot")，这里显式启用以避免跨测试日志状态污染。
+    logger.enable("nanobot")
     dispatcher = _make_dispatcher(tmp_path)
     external = tmp_path / "external.txt"
     external.write_text("outside workspace", encoding="utf-8")
