@@ -114,8 +114,6 @@ class SessionRuntimeEntry:
         nanobot_side_session_key: 业务侧会话主键（与持久化条目一致）
         acp_side_session_id: ACP 协议侧会话标识（与持久化条目一致）
         ready: 会话是否就绪可用（True=可接收请求，False=初始化中）
-        bound_model: 当前会话绑定的模型名称（可选，运行时可能动态变化）
-        bound_agent: 当前会话绑定的代理名称（可选，运行时可能动态变化）
         capabilities: 会话能力缓存（可用模型/代理列表 + 当前选择）
 
     使用场景：
@@ -128,14 +126,10 @@ class SessionRuntimeEntry:
             nanobot_side_session_key="user123:chat456",
             acp_side_session_id="abc123",
             ready=True,
-            bound_model="gpt-4",
-            bound_agent="assistant",
         )
     """
 
     nanobot_side_session_key: str
     acp_side_session_id: str
     ready: bool
-    bound_model: str | None = None
-    bound_agent: str | None = None
     capabilities: _SessionCapabilities = field(default_factory=_SessionCapabilities)

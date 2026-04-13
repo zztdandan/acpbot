@@ -9,8 +9,8 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
-from nanobot.acp.contracts import ObservabilityEventName, ObservabilityScopeName
 from nanobot.acp.acp_factory import _acp_spawn_agent_process
+from nanobot.acp.contracts import ObservabilityEventName, ObservabilityScopeName
 from nanobot.acp.runtime_client import _NanobotACPClient
 
 if TYPE_CHECKING:
@@ -82,7 +82,8 @@ async def ensure_connection(runtime: ACPRuntime) -> None:
                     event=ObservabilityEventName.CONNECTION_READY,
                 )
             )
-            await runtime.session_runtime_manager.bootstrap_ready_sessions()
+            # 连接建立后先完成 binding 真相加载与大对账；真正的 session 激活延迟到 ensure_ready_session。
+            await runtime.sessionmap_binding_manager.load_persistent_truth()
         except Exception:
             await _clear_connection_handles_without_lock(runtime)
             await runtime.process_runtime_manager.rebuild(

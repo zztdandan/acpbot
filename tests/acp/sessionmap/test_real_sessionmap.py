@@ -25,11 +25,10 @@ async def test_runtime_startup_reconciles_sessionmap_against_real_session_list(
 
     流程注解：
     1. 先把仓库里落地的 `session_map.real_fixture.json` 复制到本次测试 config-root。
-    2. `runtime.ensure_connection()` 内部会调用 `session_runtime_manager.bootstrap_ready_sessions()`。
-    3. `bootstrap_ready_sessions()` 先走 `binding_manager.load_persistent_truth()`。
-    4. `load_persistent_truth()` 再进入 `_reconcile_entries()`，这里会调真实 ACP `list_sessions`。
-    5. `_reconcile_entries()` 仅比较磁盘里的 `acpSideSessionId` 是否仍存在，不做 resume。
-    6. 所以大对账结束后，binding truth 已清理 stale 数据，但 runtime ready 表仍应为空。
+    2. `runtime.ensure_connection()` 内部会直接调用 `binding_manager.load_persistent_truth()`。
+    3. `load_persistent_truth()` 再进入 `_reconcile_entries()`，这里会调真实 ACP `list_sessions`。
+    4. `_reconcile_entries()` 仅比较磁盘里的 `acpSideSessionId` 是否仍存在，不做 resume。
+    5. 所以大对账结束后，binding truth 已清理 stale 数据，但 runtime ready 表仍应为空。
     """
 
     seed = await discover_real_session_seed()
@@ -112,8 +111,8 @@ async def test_ensure_ready_session_replays_bound_model_and_agent_after_restore(
             "ensured session should be marked ready in SessionRuntimeManager"
         )
         assert runtime_entry.acp_side_session_id == seed.target_session_id
-        assert runtime_entry.bound_model == seed.target_model_id
-        assert runtime_entry.bound_agent == seed.target_agent_id
+        assert runtime_entry.capabilities.current_model == seed.target_model_id
+        assert runtime_entry.capabilities.current_agent == seed.target_agent_id
         assert (
             runtime.session_runtime_manager.get_by_acp_side_session_id(seed.target_session_id)
             is runtime_entry

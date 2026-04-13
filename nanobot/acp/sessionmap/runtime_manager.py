@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
@@ -218,22 +218,10 @@ class SessionRuntimeManager:
             str: ACP 侧会话 ID（已就绪可用）
 
         处理流程（3 层查找）：
-            1. 检查内存中是否有就绪的会话条目（最快路径）
-            2. 尝试激活 binding_manager 中的历史绑定（恢复路径）
-            3. 创建新的 ACP 会话（兜底路径）
-
-        详细步骤：
-            步骤 1: 加载持久化真相（load_persistent_truth）
-            步骤 2: 如果内存中存在且 ready=True，直接返回（快速路径）
-            步骤 3: 确保 ACP 连接可用
-            步骤 4: 查找已有绑定（resolve_session_id）
-            步骤 5a: 如果有绑定，尝试激活（activate_session）
-            步骤 5b: 如果激活成功，更新能力缓存并返回
-            步骤 5c: 如果激活失败，清理并继续
-            步骤 6: 创建新会话（conn.new_session）
-            步骤 7: 应用模型/代理选择（优先级：preferred > bound > default）
-            步骤 8: 创建绑定（bind_session + update_bound_model/agent）
-            步骤 9: 存储运行时条目并返回
+            1. 先确认 ACP 连接可用（避免后续恢复/切换时再补救）
+            2. 检查内存中是否有就绪的会话条目（最快路径）
+            3. 仅在内存未命中时加载持久化真相并恢复历史绑定
+            4. 如果恢复失败，再走新会话兜底路径
 
         模型选择优先级：
             preferred_model > bound_model > acp_config.default_model
@@ -253,27 +241,25 @@ class SessionRuntimeManager:
             使用 _lock 保护并发访问（同一时间只处理一个请求）。
         """
         async with self._lock:
-            # 步骤 1: 加载持久化真相
-            await self._binding_manager.load_persistent_truth()
-
-            # 步骤 2: 检查内存中是否有就绪的会话（快速路径）
-            existing = self._by_nanobot_side_session_key.get(nanobot_side_session_key)
-            if existing is not None and existing.ready:
-                await self._apply_runtime_selection(
-                    acp_side_session_id=existing.acp_side_session_id,
-                    nanobot_side_session_key=nanobot_side_session_key,
-                    preferred_model=preferred_model,
-                    preferred_agent=preferred_agent,
-                )
-                return existing.acp_side_session_id
-
-            # 步骤 3: 确保 ACP 连接可用
+            # 先建立 ACP 连接，后续无论是恢复还是新建都会依赖同一个连接。
             await self._runtime.ensure_connection()
             conn = self._runtime._acp_client_conn
             if conn is None:
                 raise RuntimeError("ACP connection is not available")
 
-            # 步骤 4-5: 尝试激活已有绑定（恢复路径）
+            # 运行时内存命中是最强热路径：命中后无需再触碰磁盘真相。
+            existing = self._by_nanobot_side_session_key.get(nanobot_side_session_key)
+            if existing is not None and existing.ready:
+                await self._apply_session_selection(
+                    acp_side_session_id=existing.acp_side_session_id,
+                    nanobot_side_session_key=nanobot_side_session_key,
+                    model_id=preferred_model,
+                    agent_id=preferred_agent,
+                )
+                return existing.acp_side_session_id
+
+            await self._binding_manager.load_persistent_truth()
+
             acp_side_session_id = self._binding_manager.resolve_session_id(nanobot_side_session_key)
             if acp_side_session_id:
                 activated, payload = await self._binding_manager.activate_session(
@@ -281,7 +267,6 @@ class SessionRuntimeManager:
                     acp_side_session_id,
                 )
                 if activated:
-                    # 激活成功：更新运行时状态并返回
                     self._store_runtime_entry(
                         nanobot_side_session_key=nanobot_side_session_key,
                         acp_side_session_id=acp_side_session_id,
@@ -291,73 +276,26 @@ class SessionRuntimeManager:
                             acp_side_session_id=acp_side_session_id,
                             payload=payload,
                         )
-                    await self._apply_runtime_selection(
-                        acp_side_session_id=acp_side_session_id,
+                    selected_model, selected_agent = self._resolve_selected_preferences(
                         nanobot_side_session_key=nanobot_side_session_key,
                         preferred_model=preferred_model,
                         preferred_agent=preferred_agent,
                     )
+                    await self._apply_session_selection(
+                        acp_side_session_id=acp_side_session_id,
+                        nanobot_side_session_key=nanobot_side_session_key,
+                        model_id=selected_model,
+                        agent_id=selected_agent,
+                    )
                     return acp_side_session_id
-                # 激活失败：清理运行时条目
                 self._drop_runtime_entry(nanobot_side_session_key=nanobot_side_session_key)
 
-            # 步骤 6: 创建新会话（兜底路径）
-            cwd = (
-                Path(self._runtime.acp_config.cwd).expanduser()
-                if self._runtime.acp_config.cwd
-                else self._runtime.workspace
-            )
-            response = await conn.new_session(cwd=str(cwd.resolve()))
-            acp_side_session_id = response.session_id
-
-            # 步骤 7: 计算模型/代理选择（优先级：preferred > bound > default）
-            bound_model, bound_agent = self._binding_manager.get_bound_selection(
-                nanobot_side_session_key
-            )
-            selected_model = (
-                preferred_model or bound_model or self._runtime.acp_config.default_model
-            )
-            selected_agent = preferred_agent or bound_agent or self._runtime.acp_config.default_mode
-            if selected_model and hasattr(conn, "set_session_model"):
-                await conn.set_session_model(
-                    model_id=selected_model, session_id=acp_side_session_id
-                )
-                caps = self.get_session_capabilities(acp_side_session_id)
-                if caps is not None:
-                    caps.remember_current_model(selected_model)
-            if selected_agent and hasattr(conn, "set_session_mode"):
-                await conn.set_session_mode(mode_id=selected_agent, session_id=acp_side_session_id)
-                caps = self.get_session_capabilities(acp_side_session_id)
-                if caps is not None:
-                    caps.remember_current_agent(selected_agent)
-
-            # 步骤 8: 创建绑定并持久化
-            self._binding_manager.bind_session(nanobot_side_session_key, acp_side_session_id)
-            if selected_model:
-                self._binding_manager.update_bound_model(nanobot_side_session_key, selected_model)
-            if selected_agent:
-                self._binding_manager.update_bound_agent(nanobot_side_session_key, selected_agent)
-
-            # 步骤 9: 存储运行时条目并记录日志
-            logger.info(
-                "ACP ready session established nanobot_side_session_key={} acp_side_session_id={}",
-                nanobot_side_session_key,
-                acp_side_session_id,
-            )
-            self._store_runtime_entry(
+            return await self._create_ready_session(
                 nanobot_side_session_key=nanobot_side_session_key,
-                acp_side_session_id=acp_side_session_id,
+                preferred_model=preferred_model,
+                preferred_agent=preferred_agent,
+                conn=conn,
             )
-            self.update_caps_from_payload(acp_side_session_id=acp_side_session_id, payload=response)
-            if selected_model:
-                caps = self.get_session_capabilities(acp_side_session_id)
-                if caps is not None:
-                    caps.remember_current_model(selected_model)
-            if selected_agent:
-                caps = self.get_session_capabilities(acp_side_session_id)
-                if caps is not None:
-                    caps.remember_current_agent(selected_agent)
-            return acp_side_session_id
 
     def rebuild(self) -> None:
         """重建运行时状态：清空所有内存中的会话条目。
@@ -398,86 +336,28 @@ class SessionRuntimeManager:
         """
         self._drop_runtime_entry(nanobot_side_session_key=nanobot_side_session_key)
 
-    async def bootstrap_ready_sessions(self) -> list[str]:
-        """启动时预加载持久化真相。
-
-        返回：
-            list[str]: 空列表（当前实现不预激活会话）
-
-        处理流程：
-            1. 调用 binding_manager.load_persistent_truth 加载持久化绑定
-            2. 返回空列表（延迟激活，不在此阶段创建会话）
-
-        设计说明：
-            当前实现采用延迟激活策略（ensure_ready_session 中按需激活）。
-            不在此阶段批量激活所有会话（避免启动时间过长）。
-
-        使用场景：
-            - ACPRuntime 启动时调用
-            - 测试代码中手动触发加载
-        """
-        await self._binding_manager.load_persistent_truth()
-        return []
-
-    def update_runtime_selection(
-        self,
-        *,
-        nanobot_side_session_key: str,
-        bound_model: str | None = None,
-        bound_agent: str | None = None,
-    ) -> None:
-        """更新运行时会话的模型/代理选择（仅内存）。
-
-        参数：
-            nanobot_side_session_key: 业务侧会话键
-            bound_model: 新的模型名称（如果为 None 则不更新）
-            bound_agent: 新的代理名称（如果为 None 则不更新）
-
-        处理流程：
-            1. 查找运行时会话条目
-            2. 如果条目不存在：直接返回
-            3. 更新 bound_model（如果提供了新值）
-            4. 更新 bound_agent（如果提供了新值）
-
-        使用场景：
-            - _apply_runtime_selection 中同步更新运行时状态
-            - 用户切换模型/代理后更新内存中的绑定
-
-        注意：
-            此方法只更新内存中的运行时条目，不持久化。
-            持久化由 binding_manager.update_bound_model/agent 处理。
-        """
-        entry = self._by_nanobot_side_session_key.get(nanobot_side_session_key)
-        if entry is None:
-            return
-        if bound_model is not None:
-            entry.bound_model = bound_model
-        if bound_agent is not None:
-            entry.bound_agent = bound_agent
-
-    async def _apply_runtime_selection(
+    async def _apply_session_selection(
         self,
         *,
         acp_side_session_id: str,
         nanobot_side_session_key: str,
-        preferred_model: str | None,
-        preferred_agent: str | None,
+        model_id: str | None,
+        agent_id: str | None,
     ) -> None:
-        """应用运行时模型/代理选择（调用 ACP API + 更新缓存 + 持久化）。
+        """把目标 model/agent 选择统一刷到 ACP、持久化真相与本地能力缓存。
 
         参数：
             acp_side_session_id: ACP 侧会话 ID
             nanobot_side_session_key: 业务侧会话键
-            preferred_model: 首选模型（如果为 None 则不切换模型）
-            preferred_agent: 首选代理（如果为 None 则不切换代理）
+            model_id: 要刷到 ACP 会话的目标模型（None 表示保持当前值）
+            agent_id: 要刷到 ACP 会话的目标代理（None 表示保持当前值）
 
         处理流程（以模型为例）：
             1. 检查 ACP 连接是否可用
-            2. 如果 preferred_model 存在且 SDK 支持 set_session_model：
+            2. 如果 model_id 存在且 SDK 支持 set_session_model：
                a. 调用 ACP API 设置模型
                b. 更新运行时能力缓存（remember_current_model）
                c. 更新持久化绑定（update_bound_model）
-               d. 更新运行时选择（update_runtime_selection）
 
         使用场景：
             - ensure_ready_session 中应用用户偏好
@@ -492,29 +372,79 @@ class SessionRuntimeManager:
         if conn is None:
             return
 
-        # 应用模型选择
-        if preferred_model and hasattr(conn, "set_session_model"):
-            await conn.set_session_model(model_id=preferred_model, session_id=acp_side_session_id)
+        if model_id and hasattr(conn, "set_session_model"):
+            await conn.set_session_model(model_id=model_id, session_id=acp_side_session_id)
             caps = self.get_session_capabilities(acp_side_session_id)
             if caps is not None:
-                caps.remember_current_model(preferred_model)
-            self._binding_manager.update_bound_model(nanobot_side_session_key, preferred_model)
-            self.update_runtime_selection(
-                nanobot_side_session_key=nanobot_side_session_key,
-                bound_model=preferred_model,
-            )
+                caps.remember_current_model(model_id)
+            self._binding_manager.update_bound_model(nanobot_side_session_key, model_id)
 
-        # 应用代理选择
-        if preferred_agent and hasattr(conn, "set_session_mode"):
-            await conn.set_session_mode(mode_id=preferred_agent, session_id=acp_side_session_id)
+        if agent_id and hasattr(conn, "set_session_mode"):
+            await conn.set_session_mode(mode_id=agent_id, session_id=acp_side_session_id)
             caps = self.get_session_capabilities(acp_side_session_id)
             if caps is not None:
-                caps.remember_current_agent(preferred_agent)
-            self._binding_manager.update_bound_agent(nanobot_side_session_key, preferred_agent)
-            self.update_runtime_selection(
-                nanobot_side_session_key=nanobot_side_session_key,
-                bound_agent=preferred_agent,
-            )
+                caps.remember_current_agent(agent_id)
+            self._binding_manager.update_bound_agent(nanobot_side_session_key, agent_id)
+
+    def _resolve_selected_preferences(
+        self,
+        *,
+        nanobot_side_session_key: str,
+        preferred_model: str | None,
+        preferred_agent: str | None,
+    ) -> tuple[str | None, str | None]:
+        """统一解析恢复/新建路径的目标 model/agent 选择优先级。"""
+
+        bound_model, bound_agent = self._binding_manager.get_bound_selection(
+            nanobot_side_session_key
+        )
+        selected_model = preferred_model or bound_model or self._runtime.acp_config.default_model
+        selected_agent = preferred_agent or bound_agent or self._runtime.acp_config.default_mode
+        return selected_model, selected_agent
+
+    async def _create_ready_session(
+        self,
+        *,
+        nanobot_side_session_key: str,
+        preferred_model: str | None,
+        preferred_agent: str | None,
+        conn: Any,
+    ) -> str:
+        """创建新 ACP 会话，并完成 runtime entry / binding / selection 一次性收口。"""
+
+        cwd = (
+            Path(self._runtime.acp_config.cwd).expanduser()
+            if self._runtime.acp_config.cwd
+            else self._runtime.workspace
+        )
+        response = await conn.new_session(cwd=str(cwd.resolve()))
+        acp_side_session_id = response.session_id
+        self._store_runtime_entry(
+            nanobot_side_session_key=nanobot_side_session_key,
+            acp_side_session_id=acp_side_session_id,
+        )
+        self.update_caps_from_payload(acp_side_session_id=acp_side_session_id, payload=response)
+
+        # 先建立 binding，再统一应用最终选择；这样后续读取的持久化真相与运行态一致。
+        self._binding_manager.bind_session(nanobot_side_session_key, acp_side_session_id)
+        selected_model, selected_agent = self._resolve_selected_preferences(
+            nanobot_side_session_key=nanobot_side_session_key,
+            preferred_model=preferred_model,
+            preferred_agent=preferred_agent,
+        )
+        await self._apply_session_selection(
+            acp_side_session_id=acp_side_session_id,
+            nanobot_side_session_key=nanobot_side_session_key,
+            model_id=selected_model,
+            agent_id=selected_agent,
+        )
+
+        logger.info(
+            "ACP ready session established nanobot_side_session_key={} acp_side_session_id={}",
+            nanobot_side_session_key,
+            acp_side_session_id,
+        )
+        return acp_side_session_id
 
     def _store_runtime_entry(
         self,
@@ -532,10 +462,9 @@ class SessionRuntimeManager:
             str: acp_side_session_id（方便链式调用）
 
         处理流程：
-            1. 从 binding_manager 获取持久化绑定中的 model/agent
-            2. 创建 SessionRuntimeEntry（ready=True）
-            3. 存入 _by_nanobot_side_session_key（正向索引）
-            4. 存入 _by_acp_side_session_id（反向索引）
+            1. 创建 SessionRuntimeEntry（ready=True）
+            2. 存入 _by_nanobot_side_session_key（正向索引）
+            3. 存入 _by_acp_side_session_id（反向索引）
 
         双向索引：
             - 正向：nanobot_key -> SessionRuntimeEntry
@@ -550,15 +479,10 @@ class SessionRuntimeManager:
             此方法是私有的（_ 前缀），不直接对外暴露。
             如果 nanobot_key 或 acp_id 已存在，旧条目会被覆盖。
         """
-        bound_model, bound_agent = self._binding_manager.get_bound_selection(
-            nanobot_side_session_key
-        )
         entry = SessionRuntimeEntry(
             nanobot_side_session_key=nanobot_side_session_key,
             acp_side_session_id=acp_side_session_id,
             ready=True,
-            bound_model=bound_model,
-            bound_agent=bound_agent,
         )
         # 双向索引：同一个 entry 对象被两个字典引用
         self._by_nanobot_side_session_key[nanobot_side_session_key] = entry

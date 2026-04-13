@@ -15,7 +15,7 @@ class CommandRouter:
     """负责事件路由与进度输出编排。"""
 
     HELP_TEXT = (
-        "🐈 nanobot commands:\n"
+        "🐈 acpbot acp runtime commands:\n"
         "/new — Start a new conversation\n"
         "/stop — Stop the current task\n"
         "/help — Show available commands\n"
@@ -90,10 +90,6 @@ class CommandRouter:
             self._runtime.sessionmap_binding_manager.update_bound_model(
                 ctx.nanobot_side_session_key, arg
             )
-            self._runtime.session_runtime_manager.update_runtime_selection(
-                nanobot_side_session_key=ctx.nanobot_side_session_key,
-                bound_model=arg,
-            )
             return self._reply(ctx, f"Model switched to: {arg}")
         if command == "/set_agent":
             if not arg:
@@ -115,10 +111,6 @@ class CommandRouter:
                 caps.remember_current_agent(arg)
             self._runtime.sessionmap_binding_manager.update_bound_agent(
                 ctx.nanobot_side_session_key, arg
-            )
-            self._runtime.session_runtime_manager.update_runtime_selection(
-                nanobot_side_session_key=ctx.nanobot_side_session_key,
-                bound_agent=arg,
             )
             return self._reply(ctx, f"Agent switched to: {arg}")
         if command == "/stop":
