@@ -11,6 +11,7 @@ from acp import spawn_agent_process
 from acp.schema import ClientCapabilities, Implementation
 
 from nanobot.acp.runtime import ACPRuntime
+from nanobot.acp.sessionmap.internal.session_restore import restore_existing_session
 from nanobot.bus.queue import MessageBus
 from nanobot.config.loader import load_config, set_config_path
 
@@ -101,16 +102,30 @@ def pick_rcode_openai_model(payload: object) -> str | None:
     return collected[0] if collected else None
 
 
-async def load_or_resume_session(conn: Any, *, session_id: str) -> Any:
-    """优先 load，缺失时再退回 resume。"""
+async def resume_existing_session(conn: Any, *, session_id: str) -> Any:
+    """测试与生产保持同一规则：永远先 resume，再 fallback load。"""
 
-    load_session = getattr(conn, "load_session", None)
-    if load_session is not None:
-        return await load_session(cwd=str(HARNESS_ROOT), session_id=session_id)
-    resume_session = getattr(conn, "resume_session", None)
-    if resume_session is None:
+    payload = await restore_existing_session(conn, cwd=str(HARNESS_ROOT), session_id=session_id)
+    if payload is None:
         raise RuntimeError("ACP backend does not expose load_session or resume_session")
-    return await resume_session(cwd=str(HARNESS_ROOT), session_id=session_id)
+    return payload
+
+
+def extract_json_object(text: str) -> dict[str, Any]:
+    """从 ACP 文本响应中提取单个 JSON 对象，兼容常见 fenced code block。"""
+
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if len(lines) >= 3 and lines[-1].strip() == "```":
+            stripped = "\n".join(lines[1:-1]).strip()
+            if stripped.startswith("json"):
+                stripped = stripped[4:].strip()
+
+    payload = json.loads(stripped)
+    if not isinstance(payload, dict):
+        raise ValueError("ACP response JSON must be an object")
+    return payload
 
 
 def load_checked_in_sessionmap_fixture() -> dict[str, Any]:
@@ -150,7 +165,7 @@ async def discover_real_session_seed() -> RealSessionSeed:
                 + ", ".join(missing_fixture_sessions)
             )
 
-        target_payload = await load_or_resume_session(conn, session_id=TARGET_SESSION_ID)
+        target_payload = await resume_existing_session(conn, session_id=TARGET_SESSION_ID)
         target_model_id = pick_rcode_openai_model(target_payload)
         if target_model_id is None:
             pytest.skip("Real sessionmap tests require an available RCode_OpenAI model")

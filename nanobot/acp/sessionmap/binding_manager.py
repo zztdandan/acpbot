@@ -13,11 +13,8 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Awaitable, Callable, cast
+from typing import TYPE_CHECKING
 
-from loguru import logger
-
-from nanobot.acp.contracts import ACPSessionPayload
 from nanobot.acp.sessionmap.internal.reconcile import fetch_acp_side_session_ids
 from nanobot.acp.sessionmap.internal.storage import (
     read_sessionmap_payload,
@@ -53,6 +50,11 @@ class SessionMapBindingManager:
     def mark_unbootstrapped(self) -> None:
         """重置启动对账标志。不会清除 _entries，需后续调用 load_persistent_truth。"""
         self._bootstrapped = False
+
+    def is_bootstrapped(self) -> bool:
+        """返回 binding truth 是否已完成本 runtime 周期的 load + reconcile。"""
+
+        return self._bootstrapped
 
     def _resolved_acp_cwd(self) -> str:
         """解析 ACP 工作目录：acp_config.cwd 优先，否则 owner.workspace，展开为绝对路径。"""
@@ -209,94 +211,6 @@ class SessionMapBindingManager:
         entry.updated_at = _now_iso_with_tz()
         self.persist()
 
-    async def activate_session(
-        self, nanobot_side_session_key: str, acp_side_session_id: str
-    ) -> tuple[bool, ACPSessionPayload | None]:
-        """激活已有 ACP 会话并回放历史状态。
-
-        处理流程：
-            1. 尝试 resume_session，失败则降级 load_session
-            2. 成功后调用 _replay_after_activation 回放模型/代理偏好
-            3. 都不可用时返回 (True, None)
-
-        异常：
-            RuntimeError: ACP 连接不可用
-        """
-        conn = self._owner._acp_client_conn
-        if conn is None:
-            raise RuntimeError("ACP connection is not available")
-
-        cwd = self._resolved_acp_cwd()
-
-        # 动态获取方法（兼容不同 SDK 版本）
-        resume_session = cast(
-            Callable[..., Awaitable[ACPSessionPayload]] | None,
-            getattr(conn, "resume_session", None),
-        )
-        load_session = cast(
-            Callable[..., Awaitable[ACPSessionPayload]] | None,
-            getattr(conn, "load_session", None),
-        )
-
-        # 如果两个方法都不存在，表示无需激活
-        if resume_session is None and load_session is None:
-            return True, None
-
-        response: ACPSessionPayload | None = None
-
-        if resume_session is not None:
-            try:
-                response = await resume_session(cwd=cwd, session_id=acp_side_session_id)
-            except Exception as exc:
-                logger.debug(
-                    "ACP resume_session failed nanobot_side_session_key={} acp_side_session_id={} error_type={} error={}",
-                    nanobot_side_session_key,
-                    acp_side_session_id,
-                    type(exc).__name__,
-                    exc,
-                )
-
-        # 降级到 load_session
-        if response is None and load_session is not None:
-            try:
-                response = await load_session(cwd=cwd, session_id=acp_side_session_id)
-            except Exception as exc:
-                logger.warning(
-                    "ACP existing session activation failed nanobot_side_session_key={} acp_side_session_id={} error_type={} error={}",
-                    nanobot_side_session_key,
-                    acp_side_session_id,
-                    type(exc).__name__,
-                    exc,
-                )
-                return False, None
-
-        return True, response
-
-    async def bootstrap(self) -> list[str]:
-        """启动时激活所有已绑定会话。
-
-        处理流程：
-            1. 从磁盘加载 → 对账 → 逐个 activate_session
-            2. 返回成功激活的 nanobot_key 列表（幂等：已 bootstrapped 时返回 []）
-        """
-        if self._bootstrapped:
-            return []
-
-        self._entries = self._load_entries_from_disk()
-        await self._reconcile_entries()
-
-        ok_keys: list[str] = []
-        for nanobot_side_session_key, entry in sorted(self._entries.items()):
-            activated, _ = await self.activate_session(
-                nanobot_side_session_key,
-                entry.acp_side_session_id,
-            )
-            if activated:
-                ok_keys.append(nanobot_side_session_key)
-
-        self._bootstrapped = True
-        return ok_keys
-
     async def load_persistent_truth(self) -> None:
         """加载持久化绑定并执行启动对账。
 
@@ -304,7 +218,12 @@ class SessionMapBindingManager:
             1. 从磁盘加载条目
             2. 按 acp_side_session_id 去重（保留 revision 最高的）
             3. _reconcile_entries 清理 ACP 侧不存在的绑定
-            4. 幂等（已 bootstrapped 时跳过）
+            4. 持久化清理后的真相
+            5. 幂等（已 bootstrapped 时跳过）
+
+        边界约束：
+            此方法只负责 binding truth 的 load + reconcile。
+            不负责激活已有会话，也不会创建 runtime ready entry。
         """
         if self._bootstrapped:
             return
