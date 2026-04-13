@@ -4,19 +4,20 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import Any
+
+from nanobot.acp.contracts import JSONMap, ObservabilityEventName, ObservabilityScopeName
 
 
 @dataclass(slots=True)
 class ObservabilityEvent:
     """Structured runtime/process/state event for debug and audit sinks."""
 
-    scope: str
-    event: str
+    scope: ObservabilityScopeName
+    event: ObservabilityEventName
     request_key: str | None = None
     nanobot_side_session_key: str | None = None
     acp_side_session_id: str | None = None
-    payload: dict[str, Any] = field(default_factory=dict)
+    payload: JSONMap = field(default_factory=dict)
 
 
 class ObservabilityQueue:

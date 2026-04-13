@@ -2,13 +2,34 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Protocol
+
+from nanobot.acp.contracts import (
+    ACPCallbackUpdate,
+    ACPPermissionOption,
+    ACPToolCall,
+    JSONMap,
+)
+
+
+class _RuntimeCallbackOwner(Protocol):
+    async def handle_permission_request(
+        self,
+        *,
+        acp_side_session_id: str,
+        options: list[ACPPermissionOption],
+        tool_call: ACPToolCall,
+    ) -> object: ...
+
+    async def handle_session_update(
+        self, *, acp_side_session_id: str, update: ACPCallbackUpdate
+    ) -> None: ...
 
 
 class _NanobotACPClient:
     """ACP SDK callback surface bridged back into ACPRuntime owners."""
 
-    def __init__(self, runtime: Any) -> None:
+    def __init__(self, runtime: _RuntimeCallbackOwner) -> None:
         self.runtime = runtime
 
     async def request_permission(self, options, session_id, tool_call, **kwargs):
@@ -60,11 +81,11 @@ class _NanobotACPClient:
         del session_id, terminal_id, kwargs
         return None
 
-    async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+    async def ext_method(self, method: str, params: JSONMap) -> JSONMap:
         del method, params
         return {}
 
-    async def ext_notification(self, method: str, params: dict[str, Any]) -> None:
+    async def ext_notification(self, method: str, params: JSONMap) -> None:
         del method, params
 
     def on_connect(self, conn) -> None:

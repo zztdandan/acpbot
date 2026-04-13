@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import mimetypes
 from pathlib import Path
-from typing import Any
 from urllib.parse import unquote, urlparse
 
 from loguru import logger
+
+from nanobot.acp.contracts import ACPArtifactList, ACPArtifactMap
 
 
 def normalize_inbound_media_paths(
@@ -19,8 +20,8 @@ def normalize_inbound_media_paths(
 ) -> list[Path]:
     """Normalize inbound media to safe workspace-local file paths."""
 
-    # 中文注释：inbound media 只允许引用 workspace 内已有文件，
-    # 这样后续执行期 prompt blocks 才不会越权读到工作区外资产。
+    # Inbound media may only reference existing files inside the workspace so later
+    # prompt-block building cannot reach outside the allowed project boundary.
     workspace = workspace.resolve()
     normalized: list[Path] = []
     for raw_media in media:
@@ -68,12 +69,12 @@ def build_media_artifacts(
     media: list[str],
     nanobot_side_session_key: str,
     channel: str,
-) -> list[dict[str, Any]]:
+) -> ACPArtifactList:
     """Prepare safe media artifacts for the execution-stage prompt builder."""
 
-    # 中文注释：这里产出的 artifact 只是执行期输入材料，
-    # 不代表已经构造好了 ACP prompt block；真正 block 组装仍在执行期 helper 中完成。
-    artifacts: list[dict[str, Any]] = []
+    # These artifacts are execution-stage inputs only. They do not imply that ACP prompt
+    # blocks have already been built; block assembly still happens in the execution helper.
+    artifacts: list[ACPArtifactMap] = []
     for path in normalize_inbound_media_paths(
         workspace=workspace,
         media=media,

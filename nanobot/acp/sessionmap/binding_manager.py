@@ -4,14 +4,21 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Awaitable, Callable, cast
+from typing import TYPE_CHECKING, Awaitable, Callable, cast
 
 from loguru import logger
 
-from nanobot.acp.session_caps import _update_caps_from_session_payload
+from nanobot.acp.contracts import ACPSessionPayload
+from nanobot.acp.sessionmap.internal.reconcile import fetch_acp_side_session_ids
+from nanobot.acp.sessionmap.internal.storage import (
+    read_sessionmap_payload,
+    write_sessionmap_payload,
+)
 from nanobot.acp.sessionmap.models import SessionMapBindingEntry
-from nanobot.acp.sessionmap.reconcile import fetch_acp_side_session_ids
-from nanobot.acp.sessionmap.storage import read_sessionmap_payload, write_sessionmap_payload
+from nanobot.config.paths import get_data_dir
+
+if TYPE_CHECKING:
+    from nanobot.acp.runtime import ACPRuntime
 
 
 def _now_iso_with_tz() -> str:
@@ -21,8 +28,9 @@ def _now_iso_with_tz() -> str:
 class SessionMapBindingManager:
     """Owns persistent session binding truth and activation replay logic."""
 
-    def __init__(self, owner: Any) -> None:
+    def __init__(self, owner: ACPRuntime) -> None:
         self._owner = owner
+        self._session_map_file = get_data_dir() / "acp" / "session_map.json"
         self._entries: dict[str, SessionMapBindingEntry] = {}
         self._bootstrapped = False
 
@@ -38,7 +46,7 @@ class SessionMapBindingManager:
         return str(cwd.resolve())
 
     @staticmethod
-    def _parse_entry(raw: Any) -> SessionMapBindingEntry:
+    def _parse_entry(raw: object) -> SessionMapBindingEntry:
         if not isinstance(raw, dict):
             raise ValueError("session map entry is not object")
         cwd = raw.get("cwd")
@@ -69,20 +77,22 @@ class SessionMapBindingManager:
         )
 
     def _load_entries_from_disk(self) -> dict[str, SessionMapBindingEntry]:
-        payload = read_sessionmap_payload(self._owner._session_map_file)
+        payload = read_sessionmap_payload(self._session_map_file)
         current_cwd = self._resolved_acp_cwd()
         loaded: dict[str, SessionMapBindingEntry] = {}
-        for raw in payload.get("mappings", []):
+        raw_mappings = payload.get("mappings")
+        mappings = raw_mappings if isinstance(raw_mappings, list) else []
+        for raw in mappings:
             entry = self._parse_entry(raw)
             if entry.cwd == current_cwd:
                 loaded[entry.nanobot_side_session_key] = entry
         return loaded
 
     def persist(self) -> None:
-        # 中文注释：binding manager 是跨 runtime 生命周期的真相源，
-        # 所有会影响后续 replay 的选择与绑定变化都必须及时落盘。
+        # Binding manager is the source of truth across runtime generations, so every
+        # replay-relevant selection or binding change must persist immediately.
         write_sessionmap_payload(
-            self._owner._session_map_file,
+            self._session_map_file,
             current_cwd=self._resolved_acp_cwd(),
             entries=self._entries,
         )
@@ -110,8 +120,8 @@ class SessionMapBindingManager:
     def bind_session(self, nanobot_side_session_key: str, acp_side_session_id: str) -> None:
         current_cwd = self._resolved_acp_cwd()
         now = _now_iso_with_tz()
-        # 中文注释：同一个 acp_side_session_id 只能被一个 nanobot 会话拥有，
-        # 这里先清理反向冲突，维持 binding truth 的一对一语义。
+        # One acp_side_session_id may belong to only one nanobot session. Remove reverse
+        # conflicts first to preserve one-to-one binding truth semantics.
         for existing_key, entry in list(self._entries.items()):
             if (
                 existing_key != nanobot_side_session_key
@@ -158,27 +168,29 @@ class SessionMapBindingManager:
 
     async def activate_session(
         self, nanobot_side_session_key: str, acp_side_session_id: str
-    ) -> bool:
+    ) -> tuple[bool, ACPSessionPayload | None]:
         """Resume/load the ACP-side session and replay bound selection if possible."""
 
-        # 中文注释：binding manager 只 owner 持久化真相与激活回放；
-        # 激活成功后是否成为当前 runtime 的 ready session，则由 SessionRuntimeManager 决定。
+        # Binding manager owns only persisted truth and activation replay. Whether the
+        # activated session becomes runtime-ready is decided by SessionRuntimeManager.
         conn = self._owner._acp_client_conn
         if conn is None:
             raise RuntimeError("ACP connection is not available")
 
         cwd = self._resolved_acp_cwd()
         resume_session = cast(
-            Callable[..., Awaitable[Any]] | None, getattr(conn, "resume_session", None)
+            Callable[..., Awaitable[ACPSessionPayload]] | None,
+            getattr(conn, "resume_session", None),
         )
         load_session = cast(
-            Callable[..., Awaitable[Any]] | None, getattr(conn, "load_session", None)
+            Callable[..., Awaitable[ACPSessionPayload]] | None,
+            getattr(conn, "load_session", None),
         )
 
         if resume_session is None and load_session is None:
-            return True
+            return True, None
 
-        response: Any | None = None
+        response: ACPSessionPayload | None = None
         if resume_session is not None:
             try:
                 response = await resume_session(cwd=cwd, session_id=acp_side_session_id)
@@ -201,15 +213,12 @@ class SessionMapBindingManager:
                     type(exc).__name__,
                     exc,
                 )
-                return False
-        if response is not None:
-            _update_caps_from_session_payload(
-                self._owner._session_caps, acp_side_session_id, response
-            )
-        return await self._replay_after_activation(
+                return False, None
+        replay_ok = await self._replay_after_activation(
             nanobot_side_session_key=nanobot_side_session_key,
             acp_side_session_id=acp_side_session_id,
         )
+        return replay_ok, response
 
     async def _replay_after_activation(
         self,
@@ -217,8 +226,8 @@ class SessionMapBindingManager:
         nanobot_side_session_key: str,
         acp_side_session_id: str,
     ) -> bool:
-        # 中文注释：resume/load 只恢复 ACP 侧会话实体；真正让用户感知一致的，
-        # 是把 bound model / bound agent 再次回放到新连接周期里。
+        # resume/load restores only the ACP-side session entity. User-visible continuity
+        # still depends on replaying bound model and bound agent into the new connection.
         conn = self._owner._acp_client_conn
         if conn is None:
             raise RuntimeError("ACP connection is not available")
@@ -229,22 +238,19 @@ class SessionMapBindingManager:
         model = bound_model or self._owner.acp_config.default_model
         agent = bound_agent or self._owner.acp_config.default_mode
         set_session_model = cast(
-            Callable[..., Awaitable[Any]] | None, getattr(conn, "set_session_model", None)
+            Callable[..., Awaitable[ACPSessionPayload]] | None,
+            getattr(conn, "set_session_model", None),
         )
         set_session_mode = cast(
-            Callable[..., Awaitable[Any]] | None, getattr(conn, "set_session_mode", None)
+            Callable[..., Awaitable[ACPSessionPayload]] | None,
+            getattr(conn, "set_session_mode", None),
         )
 
         try:
-            caps = self._owner._session_caps.setdefault(
-                acp_side_session_id, self._owner.new_session_capabilities()
-            )
             if model and set_session_model is not None:
                 await set_session_model(model_id=model, session_id=acp_side_session_id)
-                caps.current_model = model
             if agent and set_session_mode is not None:
                 await set_session_mode(mode_id=agent, session_id=acp_side_session_id)
-                caps.current_agent = agent
             return True
         except Exception as exc:
             logger.warning(
@@ -265,7 +271,11 @@ class SessionMapBindingManager:
         await self._reconcile_entries()
         ok_keys: list[str] = []
         for nanobot_side_session_key, entry in sorted(self._entries.items()):
-            if await self.activate_session(nanobot_side_session_key, entry.acp_side_session_id):
+            activated, _ = await self.activate_session(
+                nanobot_side_session_key,
+                entry.acp_side_session_id,
+            )
+            if activated:
                 ok_keys.append(nanobot_side_session_key)
         self._bootstrapped = True
         return ok_keys
@@ -275,8 +285,8 @@ class SessionMapBindingManager:
 
         if self._bootstrapped:
             return
-        # 中文注释：这里故意只加载/对账真相，不自动激活 ready session；
-        # 这样 runtime rebuild 后仍然遵守“下一条请求再懒 ensure”的设计原则。
+        # Deliberately load and reconcile truth only here without auto-activating ready
+        # sessions so runtime rebuild still honors lazy ensure on the next request.
         self._entries = self._load_entries_from_disk()
         deduped: dict[str, SessionMapBindingEntry] = {}
         by_acp_side_session_id: dict[str, SessionMapBindingEntry] = {}
@@ -307,6 +317,8 @@ class SessionMapBindingManager:
         for key in stale_keys:
             stale = self._entries.pop(key, None)
             if stale is not None:
-                self._owner._session_caps.pop(stale.acp_side_session_id, None)
+                self._owner.session_runtime_manager.drop_session_capabilities(
+                    acp_side_session_id=stale.acp_side_session_id
+                )
         if stale_keys:
             self.persist()

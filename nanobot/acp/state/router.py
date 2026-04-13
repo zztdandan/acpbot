@@ -22,8 +22,8 @@ class ProgressRouter:
     async def emit(self, result: FlushResult | None) -> None:
         if self._closed or result is None:
             return
-        # 中文注释：router 负责把 pool flush 结果统一变成对外 progress 负载，
-        # 各 handler/pool 不允许各自直接调 on_progress，避免出口分裂。
+        # The router turns pool flush results into one outward progress payload shape.
+        # Individual handlers and pools must not call `on_progress` on their own.
         content, metadata, _media = build_progress_payload(result)
         await self._state_manager.emit_progress(content=content, metadata=metadata)
 
@@ -42,8 +42,8 @@ class ProgressRouter:
     async def close(self) -> None:
         if self._closed:
             return
-        # 中文注释：close 时要做尾部 flush，确保最后一批 text/media/tool/permission
-        # 不会因为 request 收尾而丢失。
+        # Close performs a final tail flush so the last text/media/tool/permission batch
+        # is not lost during request shutdown.
         pools = (
             self._state_manager.message_text_pool,
             self._state_manager.media_pool,

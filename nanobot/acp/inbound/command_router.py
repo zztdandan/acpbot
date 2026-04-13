@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING
 
+from nanobot.acp.runtime_models import InboundContext
 from nanobot.bus.events import OutboundMessage
+
+if TYPE_CHECKING:
+    from nanobot.acp.runtime import ACPRuntime
 
 
 class CommandRouter:
@@ -21,7 +25,7 @@ class CommandRouter:
         "/set_agent <agent_id> — Switch agent"
     )
 
-    def __init__(self, *, runtime: Any) -> None:
+    def __init__(self, *, runtime: ACPRuntime) -> None:
         self._runtime = runtime
 
     @staticmethod
@@ -32,7 +36,7 @@ class CommandRouter:
         parts = raw.split(maxsplit=1)
         return parts[0].lower(), parts[1].strip() if len(parts) > 1 else ""
 
-    async def maybe_handle(self, ctx: Any) -> OutboundMessage | None:
+    async def maybe_handle(self, ctx: InboundContext) -> OutboundMessage | None:
         command, arg = self.parse_command(ctx.content)
         if not command.startswith("/"):
             return None
@@ -40,15 +44,17 @@ class CommandRouter:
         if command == "/help":
             return self._reply(ctx, self.HELP_TEXT)
         if command == "/new":
-            # 中文注释：/new 不是简单删绑定；它要先停掉同 session 的 active/queued request，
-            # 再清 binding truth 与 runtime-ready entry，确保下一轮一定走全新 session ensure。
+            # `/new` is not just a binding delete. It first stops active/queued work for
+            # the same session, then drops binding truth and runtime-ready state.
             await self._runtime.ensure_sessionmap_truth_loaded()
             await self._runtime.stop_session(nanobot_side_session_key=ctx.nanobot_side_session_key)
             old_acp_side_session_id = self._runtime.drop_session_binding_and_runtime_entry(
                 nanobot_side_session_key=ctx.nanobot_side_session_key,
             )
             if old_acp_side_session_id:
-                self._runtime._session_caps.pop(old_acp_side_session_id, None)
+                self._runtime.session_runtime_manager.drop_session_capabilities(
+                    acp_side_session_id=old_acp_side_session_id
+                )
             return self._reply(ctx, "New session started.")
         if command == "/models":
             acp_side_session_id = await self._runtime.session_runtime_manager.ensure_ready_session(
@@ -66,8 +72,8 @@ class CommandRouter:
             if not arg:
                 return self._reply(ctx, "Usage: /set_model <model_id>")
             await self._runtime.ensure_connection()
-            # 中文注释：命令改 selection 既要作用于当前 ready session，
-            # 也要回写 binding truth 与 runtime entry 镜像，避免重连后退回旧默认值。
+            # Command-driven selection changes must update the current ready session and
+            # the mirrored binding/runtime state so reconnects do not fall back.
             acp_side_session_id = await self._runtime.session_runtime_manager.ensure_ready_session(
                 nanobot_side_session_key=ctx.nanobot_side_session_key,
             )
@@ -77,7 +83,10 @@ class CommandRouter:
                 model_id=arg,
                 session_id=acp_side_session_id,
             )
-            self._runtime._session_caps[acp_side_session_id].current_model = arg
+            self._runtime.session_runtime_manager.set_current_model(
+                acp_side_session_id=acp_side_session_id,
+                model_id=arg,
+            )
             self._runtime.sessionmap_binding_manager.update_bound_model(
                 ctx.nanobot_side_session_key, arg
             )
@@ -99,7 +108,10 @@ class CommandRouter:
                 mode_id=arg,
                 session_id=acp_side_session_id,
             )
-            self._runtime._session_caps[acp_side_session_id].current_agent = arg
+            self._runtime.session_runtime_manager.set_current_agent(
+                acp_side_session_id=acp_side_session_id,
+                agent_id=arg,
+            )
             self._runtime.sessionmap_binding_manager.update_bound_agent(
                 ctx.nanobot_side_session_key, arg
             )
@@ -109,8 +121,8 @@ class CommandRouter:
             )
             return self._reply(ctx, f"Agent switched to: {arg}")
         if command == "/stop":
-            # 中文注释：command 层只负责生成用户可见 ack；
-            # 真正 active/queued 的停止判断与执行都下沉到 runtime/process manager。
+            # The command layer only produces a user-visible acknowledgement. Real stop
+            # decisions and execution remain inside runtime/process manager owners.
             result = await self._runtime.stop_session(
                 nanobot_side_session_key=ctx.nanobot_side_session_key,
             )
@@ -124,7 +136,7 @@ class CommandRouter:
         return self._reply(ctx, f"Unknown ACP slash command: {command}")
 
     @staticmethod
-    def _reply(ctx: Any, content: str) -> OutboundMessage:
+    def _reply(ctx: InboundContext, content: str) -> OutboundMessage:
         return OutboundMessage(
             channel=ctx.channel,
             chat_id=ctx.chat_id,

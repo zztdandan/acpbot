@@ -12,7 +12,9 @@ import asyncio
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Awaitable, Callable
+
+from nanobot.acp.contracts import ACPArtifactMap, ACPChannelName, ACPDirectIdentity, JSONMap
 
 from nanobot.bus.events import InboundMessage, OutboundMessage
 
@@ -49,12 +51,12 @@ class ProcessDirectInput:
     """Runtime-level normalized input for direct process entry."""
 
     content: str
-    nanobot_side_session_key: str = "cli:direct"
-    channel: str = "cli"
-    chat_id: str = "direct"
+    nanobot_side_session_key: str = ACPDirectIdentity.SESSION_KEY.value
+    channel: str = ACPChannelName.CLI.value
+    chat_id: str = ACPDirectIdentity.CHAT_ID.value
     sender_id: str | None = None
     media: list[str] = field(default_factory=list)
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: JSONMap = field(default_factory=dict)
     on_progress: ProgressCallback | None = None
 
 
@@ -69,9 +71,9 @@ class ProcessRequest:
     sender_id: str | None
     content: str
     media: list[str]
-    metadata: dict[str, Any]
+    metadata: JSONMap
     on_progress: ProgressCallback | None = None
-    artifacts: dict[str, Any] = field(default_factory=dict)
+    artifacts: dict[str, ACPArtifactMap | list[ACPArtifactMap]] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -81,17 +83,17 @@ class InboundContext:
     request_key: str
     nanobot_side_session_key: str
     raw_message: InboundMessage | None = None
-    channel: str = "cli"
-    chat_id: str = "direct"
+    channel: str = ACPChannelName.CLI.value
+    chat_id: str = ACPDirectIdentity.CHAT_ID.value
     sender_id: str | None = None
     content: str = ""
     media: list[str] = field(default_factory=list)
-    metadata: dict[str, Any] = field(default_factory=dict)
-    progress_metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: JSONMap = field(default_factory=dict)
+    progress_metadata: JSONMap = field(default_factory=dict)
     on_progress: ProgressCallback | None = None
     direct_response: OutboundMessage | None = None
     process_request: ProcessRequest | None = None
-    artifacts: dict[str, Any] = field(default_factory=dict)
+    artifacts: dict[str, ACPArtifactMap | list[ACPArtifactMap]] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

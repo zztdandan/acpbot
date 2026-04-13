@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from nanobot.acp.sessionmap.models import _SessionCapabilities
 from nanobot.acp.state.manager import SessionStateManager
 from nanobot.acp.state.models import (
     ACPBucketType,
@@ -19,16 +20,6 @@ class _ACPDispatchError(RuntimeError):
     def __init__(self, partial_response: str = "") -> None:
         super().__init__("ACP dispatch failed")
         self.partial_response = partial_response
-
-
-class _SessionCapabilities:
-    """Compatibility capability cache preserved for selection commands and replay."""
-
-    def __init__(self) -> None:
-        self.available_models: list[str] = []
-        self.current_model: str | None = None
-        self.available_agents: list[str] = []
-        self.current_agent: str | None = None
 
 
 __all__ = [

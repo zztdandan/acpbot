@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
 
 from nanobot.acp.state.models import ACPOutboundKind, FlushResult
 
@@ -15,9 +14,9 @@ class MessageTextPool:
     text: str = ""
     _last_flushed_text: str = ""
 
-    def accept(self, payload: Any) -> None:
-        # 中文注释：文本 pool 要兼容 ACP 可能回放“全量文本”或“增量文本”两种形态，
-        # 因此这里做去重拼接，避免 final/progress 都出现重复内容。
+    def accept(self, payload: object) -> None:
+        # Text updates can arrive as full snapshots or incremental chunks, so this pool
+        # deduplicates aggressively to avoid repeated progress and final content.
         chunk = str(payload or "")
         if not chunk:
             return
@@ -32,8 +31,8 @@ class MessageTextPool:
         self.text += chunk
 
     def flush(self) -> FlushResult | None:
-        # 中文注释：flush 只发布“自上次 flush 之后真正变化过”的内容，
-        # 这样 state router 才能稳定地把它镜像成结构化 progress。
+        # Only publish content that changed since the last flush so the state router can
+        # mirror stable structured progress.
         if not self.text or self.text == self._last_flushed_text:
             return None
         self._last_flushed_text = self.text
@@ -53,7 +52,7 @@ class MediaPool:
     media_paths: list[str] = field(default_factory=list)
     _last_flushed_count: int = 0
 
-    def accept(self, payload: Any) -> None:
+    def accept(self, payload: object) -> None:
         path = str(payload or "").strip()
         if path and path not in self.media_paths:
             self.media_paths.append(path)
@@ -61,8 +60,8 @@ class MediaPool:
     def flush(self) -> FlushResult | None:
         if len(self.media_paths) <= self._last_flushed_count:
             return None
-        # 中文注释：media pool 以“新增资源列表”为 flush 单位，
-        # 避免每次 progress 都重复回放全部历史附件。
+        # Flush media as only the newly added slice so progress does not replay the full
+        # attachment history every time.
         flushed = self.media_paths[self._last_flushed_count :]
         self._last_flushed_count = len(self.media_paths)
         return FlushResult(kind=ACPOutboundKind.MEDIA, media=list(flushed))
@@ -81,7 +80,7 @@ class ToolPool:
     latest_message: str = ""
     _dirty: bool = False
 
-    def accept(self, payload: Any) -> None:
+    def accept(self, payload: object) -> None:
         message = str(payload or "").strip()
         if not message:
             return
@@ -91,8 +90,8 @@ class ToolPool:
     def flush(self) -> FlushResult | None:
         if not self._dirty or not self.latest_message:
             return None
-        # 中文注释：tool pool 在 flush 时补齐 tool_hint 元数据，
-        # 让 state 统一出口仍能保留旧链路需要的 tool hint 语义。
+        # Reattach tool_hint metadata during flush so the unified state exit keeps the
+        # legacy tool-hint semantics that downstream consumers still expect.
         self._dirty = False
         return FlushResult(
             kind=ACPOutboundKind.TOOL,
@@ -114,7 +113,7 @@ class PermissionPool:
     prompt: str = ""
     _dirty: bool = False
 
-    def accept(self, payload: Any) -> None:
+    def accept(self, payload: object) -> None:
         prompt = str(payload or "").strip()
         if not prompt:
             return
@@ -124,8 +123,8 @@ class PermissionPool:
     def flush(self) -> FlushResult | None:
         if not self._dirty or not self.prompt:
             return None
-        # 中文注释：permission prompt 也走统一 FlushResult，
-        # 这样 permission progress 与 text/tool progress 共用同一条 state 出口。
+        # Permission prompts also flow through the unified FlushResult path so permission,
+        # text, and tool progress all share the same state-owned output boundary.
         self._dirty = False
         return FlushResult(kind=ACPOutboundKind.PERMISSION, content=self.prompt)
 

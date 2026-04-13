@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Protocol
 
 
 class StateHandler(Protocol):
     """Minimal handler protocol kept for future handler extraction."""
 
-    def consume(self, payload: Any) -> None: ...
+    def consume(self, payload: object) -> None: ...

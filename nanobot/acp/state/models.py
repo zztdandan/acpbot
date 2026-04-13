@@ -8,7 +8,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Protocol
+from typing import Protocol
+
+from nanobot.acp.contracts import JSONMap
 
 
 class ACPUpdateType(str, Enum):
@@ -48,7 +50,7 @@ class FlushResult:
     kind: ACPOutboundKind
     content: str = ""
     media: list[str] = field(default_factory=list)
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: JSONMap = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -57,14 +59,14 @@ class RequestScopeState:
 
     final_text: str = ""
     media_paths: list[str] = field(default_factory=list)
-    final_metadata: dict[str, Any] = field(default_factory=dict)
+    final_metadata: JSONMap = field(default_factory=dict)
     partial_text: str = ""
 
 
 class ACPPool(Protocol):
     """Shared pool contract used by state handlers and the router."""
 
-    def accept(self, payload: Any) -> None: ...
+    def accept(self, payload: object) -> None: ...
 
     def flush(self) -> FlushResult | None: ...
 

@@ -27,8 +27,8 @@ class InboundManager:
         *,
         request_key: str,
     ) -> None:
-        # 中文注释：direct 入口先把 runtime 输入收敛成统一 ctx，
-        # 之后与 bus 路径共享同一种 pipeline 协议，而不是保留两套散装前处理。
+        # Direct entry first collapses runtime input into one ctx so it can share the
+        # same pipeline protocol as the bus path instead of keeping two ad-hoc flows.
         ctx = InboundContext(
             request_key=request_key,
             nanobot_side_session_key=input.nanobot_side_session_key,
@@ -44,8 +44,8 @@ class InboundManager:
 
     async def handle_inbound(self, message, *, request_key: str) -> None:
         async def _bus_progress(content: str, **metadata) -> None:
-            # 中文注释：bus 路径没有 direct 调用方可回调，
-            # 因此 state 的 progress sink 在这里桥接成 bus outbound progress message。
+            # The bus path has no direct caller callback, so bridge state progress here
+            # into bus outbound progress messages.
             outbound = self._runtime.new_outbound_message(
                 channel=message.channel,
                 chat_id=message.chat_id,
@@ -89,8 +89,8 @@ class InboundManager:
         for step in steps:
             await step(ctx)
             if ctx.direct_response is not None:
-                # 中文注释：inbound 可以决定 direct return，但不能直接碰 runtime wait map；
-                # 仍必须回到统一 completion 入口结束请求。
+                # Inbound may decide on a direct return, but it still must finish through
+                # the unified completion entrypoint instead of touching runtime wait maps.
                 await self._runtime.complete_process_request(
                     ctx.request_key,
                     outbound=ctx.direct_response,
@@ -98,6 +98,6 @@ class InboundManager:
                 return
         if ctx.process_request is None:
             raise RuntimeError("inbound finished without process request")
-        # 中文注释：没有 direct response 时，inbound 的职责到此结束；
-        # 后续 active/queue 由 ProcessRuntimeManager 接管。
+        # Without a direct response, inbound stops here and ProcessRuntimeManager takes
+        # over the active/queue lifecycle.
         await self._runtime.process_runtime_manager.enqueue(ctx.process_request)

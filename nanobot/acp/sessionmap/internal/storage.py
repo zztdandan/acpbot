@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
+from nanobot.acp.contracts import JSONMap
 from nanobot.acp.sessionmap.models import SessionMapBindingEntry
 
 
-def read_sessionmap_payload(map_file: Path) -> dict[str, Any]:
+def read_sessionmap_payload(map_file: Path) -> JSONMap:
     """Read the on-disk sessionmap payload with strict schema validation."""
 
     if not map_file.exists():
@@ -36,8 +36,12 @@ def write_sessionmap_payload(
     payload = (
         read_sessionmap_payload(map_file) if map_file.exists() else {"version": 2, "mappings": []}
     )
-    preserved: list[dict[str, Any]] = []
-    for raw in payload.get("mappings", []):
+    preserved: list[JSONMap] = []
+    raw_mappings = payload.get("mappings")
+    mappings = raw_mappings if isinstance(raw_mappings, list) else []
+    for raw in mappings:
+        if not isinstance(raw, dict):
+            continue
         cwd = raw.get("cwd")
         if cwd != current_cwd:
             preserved.append(raw)

@@ -4,25 +4,35 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from typing import Any
+from typing import TYPE_CHECKING
 
+from nanobot.acp.contracts import ObservabilityEventName, ObservabilityScopeName
 from nanobot.acp.dispatch_process_direct import execute_process_request
-from nanobot.acp.runtime_models import ActiveProcessEntry, RequestStatus, SessionQueueState
+from nanobot.acp.runtime_models import (
+    ActiveProcessEntry,
+    ProcessRequest,
+    RequestStatus,
+    SessionQueueState,
+)
 from nanobot.acp.state import ProgressRouter, SessionStateManager, _ACPDispatchError
+from nanobot.bus.events import OutboundMessage
+
+if TYPE_CHECKING:
+    from nanobot.acp.runtime import ACPRuntime
 
 
 class ProcessRuntimeManager:
     """Owns per-session serial queues and active request indexes."""
 
-    def __init__(self, *, runtime: Any) -> None:
+    def __init__(self, *, runtime: ACPRuntime) -> None:
         self._runtime = runtime
         self.queue_by_nanobot_side_session_key: dict[str, SessionQueueState] = {}
         self.active_by_request_key: dict[str, ActiveProcessEntry] = {}
         self.active_by_acp_side_session_id: dict[str, ActiveProcessEntry] = {}
 
-    async def enqueue(self, process_request: Any) -> None:
-        # 中文注释：真正的串行队列 owner 是 ProcessRuntimeManager，
-        # inbound 只负责构造 ProcessRequest，不负责 active/queue 状态机。
+    async def enqueue(self, process_request: ProcessRequest) -> None:
+        # ProcessRuntimeManager owns the real serial queue. Inbound only assembles
+        # ProcessRequest objects and does not own the active/queue state machine.
         queue_state = self.queue_by_nanobot_side_session_key.setdefault(
             process_request.nanobot_side_session_key,
             SessionQueueState(nanobot_side_session_key=process_request.nanobot_side_session_key),
@@ -30,8 +40,8 @@ class ProcessRuntimeManager:
         queue_state.queued_requests.append(process_request)
         await self._runtime.push_observability(
             self._runtime.new_observability_event(
-                scope="process",
-                event="request_queued",
+                scope=ObservabilityScopeName.PROCESS,
+                event=ObservabilityEventName.REQUEST_QUEUED,
                 request_key=process_request.request_key,
                 nanobot_side_session_key=process_request.nanobot_side_session_key,
             )
@@ -62,8 +72,8 @@ class ProcessRuntimeManager:
     ) -> tuple[bool, int]:
         """Drop queued requests and try to stop the active ACP session if present."""
 
-        # 中文注释：/stop 的设计要求是“queued 立即丢弃，active 尝试取消”，
-        # 这里先清理 queued request 并补 completion，避免 direct/bus 调用方永久等待。
+        # `/stop` semantics are "drop queued immediately, try to cancel active". Clear
+        # queued requests first and complete them so direct/bus callers never wait forever.
         active_cancel_requested = False
         dropped_queued_count = 0
         queue_state = self.queue_by_nanobot_side_session_key.get(nanobot_side_session_key)
@@ -92,8 +102,8 @@ class ProcessRuntimeManager:
         return active_cancel_requested, dropped_queued_count
 
     async def rebuild(self, *, error: Exception) -> None:
-        # 中文注释：runtime rebuild 时，manager owner 的 active/queue 必须整批失效，
-        # 所有等待中的请求都要通过统一 completion 以 error 结束，不能静默丢失。
+        # Runtime rebuild invalidates every active and queued request owned here. All
+        # waiters must terminate through unified completion instead of silently vanishing.
         for active_entry in list(self.active_by_request_key.values()):
             try:
                 await active_entry.close()
@@ -114,23 +124,25 @@ class ProcessRuntimeManager:
 
     async def _drain_session_queue(self, queue_state: SessionQueueState) -> None:
         while queue_state.queued_requests:
-            # 中文注释：同一个 nanobot_side_session_key 永远串行；
-            # 这里是设计里 per-session process queue 的唯一推进点。
+            # A single nanobot_side_session_key always runs serially. This loop is the
+            # only place allowed to advance the per-session process queue.
             process_request = queue_state.queued_requests.popleft()
             await self._activate_and_run(process_request)
         queue_state.draining_task = None
 
-    async def _activate_and_run(self, process_request: Any) -> None:
+    async def _activate_and_run(self, process_request: ProcessRequest) -> None:
         active_entry = None
-        outbound = None
+        outbound: OutboundMessage | None = None
         error: Exception | None = None
         try:
-            # 中文注释：进入真实执行前，先 ensure ready session，
-            # 再创建 request-scope state/router，并挂到 active entry 上。
+            # Ensure the ready session before real execution, then create the request-
+            # scoped state/router pair and attach them to the active entry.
+            preferred_model = process_request.metadata.get("_acp_session_model")
+            preferred_agent = process_request.metadata.get("_acp_session_agent")
             acp_side_session_id = await self._runtime.session_runtime_manager.ensure_ready_session(
                 nanobot_side_session_key=process_request.nanobot_side_session_key,
-                preferred_model=process_request.metadata.get("_acp_session_model"),
-                preferred_agent=process_request.metadata.get("_acp_session_agent"),
+                preferred_model=preferred_model if isinstance(preferred_model, str) else None,
+                preferred_agent=preferred_agent if isinstance(preferred_agent, str) else None,
             )
             state_manager = SessionStateManager(
                 runtime=self._runtime,
@@ -156,8 +168,8 @@ class ProcessRuntimeManager:
             active_entry.status = RequestStatus.ACTIVE
             await self._runtime.push_observability(
                 self._runtime.new_observability_event(
-                    scope="process",
-                    event="request_active",
+                    scope=ObservabilityScopeName.PROCESS,
+                    event=ObservabilityEventName.REQUEST_ACTIVE,
                     request_key=active_entry.request_key,
                     nanobot_side_session_key=active_entry.nanobot_side_session_key,
                     acp_side_session_id=active_entry.acp_side_session_id,
@@ -179,9 +191,8 @@ class ProcessRuntimeManager:
             error = exc
         finally:
             if active_entry is not None:
-                # 中文注释：entry close 先于 runtime completion，
-                # 这样 state/router/pending permission 等 request-scope 资源先完成收尾，
-                # completion 阶段只保留 request_key + outbound/error 这种最小参数。
+                # Close the request-owned resources before runtime completion so
+                # completion itself only carries the minimal request_key + outbound/error.
                 active_entry.status = RequestStatus.FINISHING
                 try:
                     await active_entry.close()
@@ -192,8 +203,8 @@ class ProcessRuntimeManager:
                 self.active_by_acp_side_session_id.pop(active_entry.acp_side_session_id, None)
                 await self._runtime.push_observability(
                     self._runtime.new_observability_event(
-                        scope="process",
-                        event="request_finished",
+                        scope=ObservabilityScopeName.PROCESS,
+                        event=ObservabilityEventName.REQUEST_FINISHED,
                         request_key=active_entry.request_key,
                         nanobot_side_session_key=active_entry.nanobot_side_session_key,
                         acp_side_session_id=active_entry.acp_side_session_id,

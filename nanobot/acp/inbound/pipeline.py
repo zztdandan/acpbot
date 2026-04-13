@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
-from typing import Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Awaitable, Callable
 
 from nanobot.acp.inbound.media import build_media_artifacts
-from nanobot.acp.runtime_models import ProcessRequest
+from nanobot.acp.runtime_models import InboundContext, ProcessRequest
 
-InboundStep = Callable[[Any], Awaitable[None]]
+if TYPE_CHECKING:
+    from nanobot.acp.inbound.command_router import CommandRouter
+    from nanobot.acp.runtime import ACPRuntime
+
+InboundStep = Callable[[InboundContext], Awaitable[None]]
 
 
-def build_normalize_step(runtime: Any) -> InboundStep:
-    async def _normalize(ctx: Any) -> None:
-        # 中文注释：normalize 只做输入形态归一，不掺杂命令、permission、state 创建等 owner 逻辑。
+def build_normalize_step(runtime: ACPRuntime) -> InboundStep:
+    async def _normalize(ctx: InboundContext) -> None:
+        # Normalize only the inbound shape. It must not absorb command, permission,
+        # or state-creation owner logic.
         ctx.content = str(ctx.content or "")
         ctx.media = list(ctx.media or [])
         ctx.metadata = dict(ctx.metadata or {})
@@ -21,10 +26,10 @@ def build_normalize_step(runtime: Any) -> InboundStep:
     return _normalize
 
 
-def build_permission_inbound_step(runtime: Any) -> InboundStep:
-    async def _permission_inbound(ctx: Any) -> None:
-        # 中文注释：permission inbound 只做“像不像 reply”识别与转发，
-        # pending waiter 本身仍由目标 request 的 state owner 持有。
+def build_permission_inbound_step(runtime: ACPRuntime) -> InboundStep:
+    async def _permission_inbound(ctx: InboundContext) -> None:
+        # Permission inbound only detects and forwards likely replies. The pending
+        # waiter itself remains owned by the target request state.
         active_entry = runtime.process_runtime_manager.find_request_waiting_permission(
             nanobot_side_session_key=ctx.nanobot_side_session_key,
         )
@@ -42,12 +47,12 @@ def build_permission_inbound_step(runtime: Any) -> InboundStep:
     return _permission_inbound
 
 
-def build_command_router_step(command_router: Any) -> InboundStep:
-    async def _command_router(ctx: Any) -> None:
+def build_command_router_step(command_router: CommandRouter) -> InboundStep:
+    async def _command_router(ctx: InboundContext) -> None:
         if ctx.direct_response is not None:
             return
-        # 中文注释：slash 命令必须在真实 prompt 执行前被截获，
-        # 未知命令也显式 direct response，避免误透传给 ACP prompt。
+        # Slash commands must be intercepted before real prompt execution. Unknown
+        # commands also return directly so they are never forwarded to ACP prompt.
         response = await command_router.maybe_handle(ctx)
         if response is not None:
             ctx.direct_response = response
@@ -55,10 +60,10 @@ def build_command_router_step(command_router: Any) -> InboundStep:
     return _command_router
 
 
-def build_media_prepare_step(runtime: Any) -> InboundStep:
-    async def _media_prepare(ctx: Any) -> None:
-        # 中文注释：inbound 只准备 media artifact，不在这里构造最终 prompt blocks；
-        # prompt blocks builder 是执行期私有 helper 的职责。
+def build_media_prepare_step(runtime: ACPRuntime) -> InboundStep:
+    async def _media_prepare(ctx: InboundContext) -> None:
+        # Inbound prepares media artifacts only. Final prompt blocks remain the
+        # responsibility of the execution-stage helper.
         media_artifacts = build_media_artifacts(
             workspace=runtime.workspace,
             media=ctx.media,
@@ -77,12 +82,12 @@ def build_media_prepare_step(runtime: Any) -> InboundStep:
     return _media_prepare
 
 
-def build_process_request_step(runtime: Any) -> InboundStep:
-    async def _build_process_request(ctx: Any) -> None:
+def build_process_request_step(runtime: ACPRuntime) -> InboundStep:
+    async def _build_process_request(ctx: InboundContext) -> None:
         if ctx.direct_response is not None:
             return
-        # 中文注释：ProcessRequest 只保留真实执行必须知道的事实，
-        # 不把整个 inbound context 原样拖进执行层。
+        # ProcessRequest keeps only facts that real execution must know. The whole
+        # inbound context does not cross into the execution layer unchanged.
         ctx.process_request = ProcessRequest(
             request_key=ctx.request_key,
             nanobot_side_session_key=ctx.nanobot_side_session_key,

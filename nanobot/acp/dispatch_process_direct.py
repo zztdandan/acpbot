@@ -2,45 +2,57 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING
 
 from nanobot.acp.acp_errors import _is_invalid_params_request_error
 from nanobot.acp.acp_factory import _acp_resource_link_block, _acp_text_block
+from nanobot.acp.contracts import ACPArtifactList, JSONMap
+from nanobot.acp.runtime_models import ActiveProcessEntry, ProcessRequest
 from nanobot.acp.state import _ACPDispatchError
+from nanobot.bus.events import OutboundMessage
+
+if TYPE_CHECKING:
+    from nanobot.acp.runtime import ACPRuntime
 
 
-def build_prompt_blocks(process_request: Any) -> list[Any]:
+def build_prompt_blocks(process_request: ProcessRequest) -> list[object]:
     """Build ACP prompt blocks only for the real execution path."""
 
-    # 中文注释：prompt blocks builder 明确只属于执行期私有 helper，
-    # 不再挂在 runtime/inbound 顶层，避免 runtime 重新膨胀成细节 owner。
-    blocks: list[Any] = [_acp_text_block(process_request.content)]
-    for artifact in process_request.artifacts.get("media_artifacts", []):
+    # Prompt-block building belongs strictly to the execution stage so runtime and
+    # inbound do not grow back into low-level detail owners.
+    blocks: list[object] = [_acp_text_block(process_request.content)]
+    raw_media_artifacts = process_request.artifacts.get("media_artifacts", [])
+    media_artifacts: ACPArtifactList = (
+        raw_media_artifacts if isinstance(raw_media_artifacts, list) else []
+    )
+    for artifact in media_artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        size_value = artifact.get("size")
         blocks.append(
             _acp_resource_link_block(
-                name=artifact["name"],
-                uri=artifact["uri"],
-                mime_type=artifact["mime_type"],
-                size=artifact["size"],
+                name=str(artifact["name"]),
+                uri=str(artifact["uri"]),
+                mime_type=str(artifact["mime_type"]) if artifact.get("mime_type") else None,
+                size=size_value if isinstance(size_value, int) else None,
             )
         )
     return blocks
 
 
-async def execute_process_request(runtime: Any, active_entry: Any) -> Any:
+async def execute_process_request(
+    runtime: ACPRuntime, active_entry: ActiveProcessEntry
+) -> OutboundMessage:
     """Execute one ACP prompt against a ready ACP session and let callbacks fill state."""
 
     if runtime._acp_client_conn is None:
         raise RuntimeError("ACP connection is not available")
     process_request = active_entry.process_request
-    # 中文注释：当前 ready session 的 model/agent 会一起透传给 ACP prompt，
-    # 这样执行链路与 session replay 的选择事实保持一致。
-    caps = runtime._session_caps.get(active_entry.acp_side_session_id)
-    prompt_meta: dict[str, Any] = {}
-    if caps is not None and isinstance(caps.current_model, str) and caps.current_model:
-        prompt_meta["nanobot_session_model"] = caps.current_model
-    if caps is not None and isinstance(caps.current_agent, str) and caps.current_agent:
-        prompt_meta["nanobot_session_agent"] = caps.current_agent
+    # Forward the ready session's model/agent selection to ACP prompt so execution
+    # uses the same selection facts that session replay established.
+    prompt_meta: JSONMap = runtime.session_runtime_manager.build_prompt_metadata(
+        acp_side_session_id=active_entry.acp_side_session_id
+    )
 
     try:
         await runtime.await_acp_prompt(
@@ -50,14 +62,14 @@ async def execute_process_request(runtime: Any, active_entry: Any) -> Any:
         )
         return active_entry.state_manager.materialize_final_outbound(partial=False)
     except Exception as exc:
-        # 中文注释：invalid params 往往意味着历史 session 真相已经失效，
-        # 这里直接清掉 binding truth + runtime-ready entry，让下一轮重新 ensure。
+        # `invalid params` usually means the historical session truth is stale, so drop
+        # both binding truth and runtime-ready state to force a fresh ensure next time.
         if _is_invalid_params_request_error(exc):
             runtime.drop_session_binding_and_runtime_entry(
                 nanobot_side_session_key=process_request.nanobot_side_session_key,
             )
-        # 中文注释：即使执行失败，也优先尝试从 state 聚合里 materialize partial，
-        # 保持“partial fallback 仍属于 state owner”这一设计约束。
+        # Even on execution failure, prefer materializing a partial response from state so
+        # partial fallback remains a state-owned responsibility.
         partial = active_entry.state_manager.materialize_final_outbound(partial=True)
         if partial.content or partial.media:
             raise _ACPDispatchError(partial_response=partial.content) from exc

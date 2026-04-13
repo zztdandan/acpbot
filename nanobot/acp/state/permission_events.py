@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+
+from nanobot.acp.contracts import ACPPermissionOption, ACPToolCall
 
 
 @dataclass(slots=True)
 class PendingPermissionRequest:
     """Active permission request waiting for an inbound reply."""
 
-    options: list[Any]
-    tool_call: Any | None = None
+    options: list[ACPPermissionOption]
+    tool_call: ACPToolCall | None = None
     prompt_text: str = ""

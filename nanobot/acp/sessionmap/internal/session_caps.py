@@ -1,14 +1,14 @@
-"""ACP session 能力解析与展示辅助。"""
+"""Session capability helpers kept internal to sessionmap-driven ACP flows."""
 
 from __future__ import annotations
 
-from typing import Any
+from nanobot.acp.contracts import ACPSessionPayload, JSONMap
+from nanobot.acp.sessionmap.models import _SessionCapabilities
 
-from nanobot.acp.state import _SessionCapabilities
 
+def _pick(obj: ACPSessionPayload, *names: str) -> ACPSessionPayload:
+    """Return the first matching snake_case/camelCase attribute if present."""
 
-def _pick(obj: Any, *names: str) -> Any:
-    """兼容 snake/camel 字段名时，按候选名顺序取值。"""
     for name in names:
         if hasattr(obj, name):
             return getattr(obj, name)
@@ -16,12 +16,11 @@ def _pick(obj: Any, *names: str) -> Any:
 
 
 def _update_caps_from_session_payload(
-    session_caps: dict[str, _SessionCapabilities],
-    session_id: str,
-    payload: Any,
+    caps: _SessionCapabilities,
+    payload: ACPSessionPayload,
 ) -> None:
-    """从 ACP session payload 中提取模型/agent 能力缓存。"""
-    caps = session_caps.setdefault(session_id, _SessionCapabilities())
+    """Extract model/agent capability caches from an ACP session payload."""
+
     models = _pick(payload, "models")
     if models is not None:
         current = _pick(models, "current_model_id", "currentModelId")
@@ -52,11 +51,10 @@ def _update_caps_from_session_payload(
 
 
 def _render_models_command(
-    session_caps: dict[str, _SessionCapabilities],
-    session_id: str,
+    caps: _SessionCapabilities | None,
 ) -> str:
-    """格式化当前 session 的模型列表。"""
-    caps = session_caps.get(session_id)
+    """Format the model catalog for the current session."""
+
     if not caps or not caps.available_models:
         return "No model catalog returned by current ACP backend for this session."
     lines = []
@@ -69,11 +67,10 @@ def _render_models_command(
 
 
 def _render_agents_command(
-    session_caps: dict[str, _SessionCapabilities],
-    session_id: str,
+    caps: _SessionCapabilities | None,
 ) -> str:
-    """格式化当前 session 的 agent(mode) 列表。"""
-    caps = session_caps.get(session_id)
+    """Format the agent/mode catalog for the current session."""
+
     if not caps or not caps.available_agents:
         return "No agent/mode catalog returned by current ACP backend for this session."
     lines = []
@@ -83,3 +80,14 @@ def _render_agents_command(
         lines.append(f"{prefix}{agent_id}")
     header = f"Current agent: {current}" if current else "Current agent: unknown"
     return "\n".join([header, "Available agents:", *lines])
+
+
+def _build_prompt_metadata(caps: _SessionCapabilities | None) -> JSONMap:
+    """Build prompt metadata from runtime capability cache."""
+
+    prompt_meta: JSONMap = {}
+    if caps is not None and isinstance(caps.current_model, str) and caps.current_model:
+        prompt_meta["nanobot_session_model"] = caps.current_model
+    if caps is not None and isinstance(caps.current_agent, str) and caps.current_agent:
+        prompt_meta["nanobot_session_agent"] = caps.current_agent
+    return prompt_meta

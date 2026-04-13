@@ -3,15 +3,34 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import TYPE_CHECKING, Protocol
 
 from loguru import logger
 
+from nanobot.acp.contracts import (
+    ACPCallbackUpdate,
+    ACPPermissionKind,
+    ACPPermissionOption,
+    ACPResourceBlock,
+    ACPToolCall,
+    JSONMap,
+    ObservabilityEventName,
+    ObservabilityScopeName,
+    build_permission_selected_payload,
+)
 from nanobot.acp.observability import ObservabilityEvent
+from nanobot.acp.runtime_models import ProgressCallback
 from nanobot.acp.state.models import RequestScopeState
 from nanobot.acp.state.permission_events import PendingPermissionRequest
 from nanobot.acp.state.pools import MediaPool, MessageTextPool, PermissionPool, ToolPool
 from nanobot.bus.events import OutboundMessage
+
+if TYPE_CHECKING:
+    from nanobot.acp.state.router import ProgressRouter
+
+
+class _RuntimeObservabilityOwner(Protocol):
+    async def push_observability(self, event: ObservabilityEvent) -> None: ...
 
 
 class SessionStateManager:
@@ -20,13 +39,13 @@ class SessionStateManager:
     def __init__(
         self,
         *,
-        runtime: Any,
+        runtime: _RuntimeObservabilityOwner,
         request_key: str,
         nanobot_side_session_key: str,
         acp_side_session_id: str,
         channel: str,
         chat_id: str,
-        on_progress: Any,
+        on_progress: ProgressCallback | None,
     ) -> None:
         self._runtime = runtime
         self.request_key = request_key
@@ -41,28 +60,28 @@ class SessionStateManager:
         self.tool_pool = ToolPool()
         self.permission_pool = PermissionPool()
         self._closed = False
-        self._progress_router: Any | None = None
-        self._pending_permission_future: asyncio.Future[Any] | None = None
+        self._progress_router: ProgressRouter | None = None
+        self._pending_permission_future: asyncio.Future[str] | None = None
         self._pending_permission_request: PendingPermissionRequest | None = None
 
     def is_closed(self) -> bool:
         return self._closed
 
-    def bind_progress_router(self, progress_router: Any) -> None:
+    def bind_progress_router(self, progress_router: ProgressRouter) -> None:
         """Bind the progress router so state owns its close lifecycle."""
 
-        # 中文注释：state close 不再要求外层分别 close router / flush pool；
-        # router 一旦绑定到 state，收尾链路就由 state 自己统一掌握。
+        # Once router is bound to state, state owns the entire shutdown path and callers
+        # no longer need to close the router or flush pools separately.
         self._progress_router = progress_router
 
-    async def emit_progress(self, *, content: str, metadata: dict[str, Any]) -> None:
+    async def emit_progress(self, *, content: str, metadata: JSONMap) -> None:
         """Mirror structured progress to the request on_progress sink if present."""
 
         if not content or self.on_progress is None:
             return
-        # 中文注释：state 才是结构化 progress 的事实源；
-        # on_progress 只是兼容性镜像 sink，因此签名兼容也集中收口在这里处理。
-        callback_kwargs: dict[str, Any] = {}
+        # State is the source of truth for structured progress. `on_progress` is only a
+        # compatibility mirror sink, so signature adaptation is centralized here.
+        callback_kwargs: dict[str, object] = {}
         if "tool_hint" in metadata:
             callback_kwargs["tool_hint"] = metadata["tool_hint"]
         if "tool_event" in metadata:
@@ -70,7 +89,8 @@ class SessionStateManager:
         try:
             await self.on_progress(content, **callback_kwargs)
         except TypeError:
-            # 中文注释：兼容旧 on_progress 签名，统一在 state 出口做薄适配。
+            # Older `on_progress` callbacks accepted fewer keyword arguments, so keep a
+            # narrow fallback only at the state exit boundary.
             try:
                 if "tool_hint" in callback_kwargs:
                     await self.on_progress(content, tool_hint=callback_kwargs["tool_hint"])
@@ -81,14 +101,19 @@ class SessionStateManager:
         except Exception:
             logger.exception("ACP state on_progress emit failed")
 
-    async def consume_session_update(self, update: Any, *, progress_router: Any) -> None:
+    async def consume_session_update(
+        self,
+        update: ACPCallbackUpdate,
+        *,
+        progress_router: ProgressRouter,
+    ) -> None:
         """Consume ACP callback updates into request-scoped facts and progress pools."""
 
         if self._closed:
             await self._runtime.push_observability(
                 ObservabilityEvent(
-                    scope="state",
-                    event="late_session_update",
+                    scope=ObservabilityScopeName.STATE,
+                    event=ObservabilityEventName.LATE_SESSION_UPDATE,
                     request_key=self.request_key,
                     nanobot_side_session_key=self.nanobot_side_session_key,
                     acp_side_session_id=self.acp_side_session_id,
@@ -107,8 +132,8 @@ class SessionStateManager:
         )
 
         if isinstance(update, AgentMessageChunk) and isinstance(update.content, TextContentBlock):
-            # 中文注释：文本既要进入 progress pool，也要进入 request final_text 聚合，
-            # 这正是 state 既是“进度事实中心”也是“最终结果聚合器”的设计要点。
+            # Text must feed both the progress pool and final-text aggregation. That is
+            # exactly why state owns both progress facts and final result materialization.
             text = str(getattr(update.content, "text", "") or "")
             self.message_text_pool.accept(text)
             self.request_scope.final_text = self.message_text_pool.text.strip()
@@ -120,8 +145,8 @@ class SessionStateManager:
             update.content,
             (ImageContentBlock, ResourceContentBlock, EmbeddedResourceContentBlock),
         ):
-            # 中文注释：媒体路径由 state request-scope 聚合统一收口，
-            # 不再回写 runtime 顶层 `_session_result_media` 一类旁路结构。
+            # Media paths are aggregated inside request-scoped state instead of flowing
+            # back into runtime-level side structures such as old `_session_result_media`.
             media_path = self._extract_media_path(update.content)
             if media_path:
                 self.media_pool.accept(media_path)
@@ -147,7 +172,7 @@ class SessionStateManager:
             return
 
     @staticmethod
-    def _extract_media_path(block: Any) -> str | None:
+    def _extract_media_path(block: ACPResourceBlock) -> str | None:
         """Best-effort extraction of a usable media path from ACP resource blocks."""
 
         for attr in ("uri", "path"):
@@ -164,12 +189,15 @@ class SessionStateManager:
         return None
 
     async def handle_permission_request(
-        self, *, options: list[Any], tool_call: Any | None = None
-    ) -> Any:
+        self,
+        *,
+        options: list[ACPPermissionOption],
+        tool_call: ACPToolCall | None = None,
+    ) -> object:
         """Wait for an inbound permission reply owned by this request state."""
 
-        # 中文注释：pending permission waiter 属于当前 request 的 state，
-        # inbound 只负责把 reply 送进来，不自己持有 future 或 timeout 判定。
+        # The pending permission waiter belongs to this request state. Inbound only
+        # delivers replies and does not own the future or timeout decision.
         if self._closed:
             raise RuntimeError("permission request received after state closed")
 
@@ -194,8 +222,8 @@ class SessionStateManager:
         except asyncio.TimeoutError as exc:
             await self._runtime.push_observability(
                 ObservabilityEvent(
-                    scope="state",
-                    event="permission_timeout",
+                    scope=ObservabilityScopeName.STATE,
+                    event=ObservabilityEventName.PERMISSION_TIMEOUT,
                     request_key=self.request_key,
                     nanobot_side_session_key=self.nanobot_side_session_key,
                     acp_side_session_id=self.acp_side_session_id,
@@ -207,7 +235,7 @@ class SessionStateManager:
             self._pending_permission_request = None
 
         return RequestPermissionResponse.model_validate(
-            {"outcome": {"outcome": "selected", "optionId": selected_option_id}}
+            build_permission_selected_payload(selected_option_id)
         )
 
     def has_pending_permission(self) -> bool:
@@ -239,8 +267,8 @@ class SessionStateManager:
         if future is None or future.done() or request is None:
             await self._runtime.push_observability(
                 ObservabilityEvent(
-                    scope="state",
-                    event="permission_reply_not_found",
+                    scope=ObservabilityScopeName.STATE,
+                    event=ObservabilityEventName.PERMISSION_REPLY_NOT_FOUND,
                     request_key=self.request_key,
                     nanobot_side_session_key=self.nanobot_side_session_key,
                     acp_side_session_id=self.acp_side_session_id,
@@ -261,7 +289,9 @@ class SessionStateManager:
         return "Permission reply received."
 
     @staticmethod
-    def _select_permission_option(options: list[Any], reply_text: str) -> str | None:
+    def _select_permission_option(
+        options: list[ACPPermissionOption], reply_text: str
+    ) -> str | None:
         """Map simple user replies onto ACP permission option ids."""
 
         reply = reply_text.strip().lower()
@@ -282,7 +312,10 @@ class SessionStateManager:
                     getattr(getattr(option, "kind", None), "value", getattr(option, "kind", ""))
                     or ""
                 )
-                if kind in {"allow_once", "allow_always"}:
+                if kind in {
+                    ACPPermissionKind.ALLOW_ONCE.value,
+                    ACPPermissionKind.ALLOW_ALWAYS.value,
+                }:
                     return option.option_id
         if reply in {"cancel", "deny", "no", "n"}:
             for option in options:
@@ -290,12 +323,12 @@ class SessionStateManager:
                     getattr(getattr(option, "kind", None), "value", getattr(option, "kind", ""))
                     or ""
                 )
-                if kind == "cancelled":
+                if kind == ACPPermissionKind.CANCELLED.value:
                     return option.option_id
         return None
 
     @staticmethod
-    def _render_permission_prompt(options: list[Any]) -> str:
+    def _render_permission_prompt(options: list[ACPPermissionOption]) -> str:
         lines = ["ACP requires permission. Reply with /permission <number>:"]
         for index, option in enumerate(options, start=1):
             kind = getattr(
@@ -308,8 +341,8 @@ class SessionStateManager:
     def materialize_final_outbound(self, *, partial: bool = False) -> OutboundMessage:
         """Materialize the final outbound from request-scoped facts."""
 
-        # 中文注释：最终 OutboundMessage 的 owner 在 state，
-        # ProcessRuntimeManager 只消费 materialize 结果，不自己拼 final。
+        # State owns final OutboundMessage materialization. ProcessRuntimeManager only
+        # consumes the result instead of building final payloads itself.
         content = self.request_scope.partial_text if partial else self.request_scope.final_text
         return OutboundMessage(
             channel=self.channel,
@@ -324,8 +357,8 @@ class SessionStateManager:
 
         if self._closed:
             return
-        # 中文注释：close 是单轮 request 的最终边界；一旦关闭，late write 只能记观测，
-        # 不能再继续污染 final 聚合或 progress 输出。
+        # Close is the hard boundary for one request. After it flips, late writes are
+        # only observable events and can no longer mutate final aggregation or progress.
         self._closed = True
         if self._progress_router is not None:
             await self._progress_router.close()

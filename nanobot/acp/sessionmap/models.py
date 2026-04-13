@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+
+from nanobot.acp.contracts import JSONMap
 
 
 @dataclass(slots=True)
@@ -18,8 +19,8 @@ class SessionMapBindingEntry:
     updated_at: str
     revision: int
 
-    def as_payload(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {
+    def as_payload(self) -> JSONMap:
+        payload: JSONMap = {
             "cwd": self.cwd,
             "nanobotSideSessionKey": self.nanobot_side_session_key,
             "acpSideSessionId": self.acp_side_session_id,
@@ -42,3 +43,14 @@ class SessionRuntimeEntry:
     ready: bool
     bound_model: str | None = None
     bound_agent: str | None = None
+    capabilities: "_SessionCapabilities" = field(default_factory=lambda: _SessionCapabilities())
+
+
+class _SessionCapabilities:
+    """Runtime-only capability cache for one active ACP session."""
+
+    def __init__(self) -> None:
+        self.available_models: list[str] = []
+        self.current_model: str | None = None
+        self.available_agents: list[str] = []
+        self.current_agent: str | None = None

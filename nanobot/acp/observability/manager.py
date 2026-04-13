@@ -24,8 +24,8 @@ class ObservabilityManager:
     async def start(self) -> None:
         if self._running:
             return
-        # 中文注释：observability 不是调试时临时附加的 logger，
-        # 而是 runtime/process/state 共用的结构化事件 owner，所以 direct/bus 两条路径都会主动启动它。
+        # Observability is not a temporary debug logger. It is the shared structured-
+        # event owner for runtime, process, and state, so both direct and bus paths start it.
         self._running = True
         self._consumer_task = asyncio.create_task(self._consume_loop())
 
@@ -41,8 +41,8 @@ class ObservabilityManager:
                 pass
 
     async def push(self, event: ObservabilityEvent) -> None:
-        # 中文注释：业务模块只 push 事件，不关心落盘/展示细节；
-        # 这样审计与工具化输出才能与业务 owner 解耦。
+        # Business modules only push events here and stay unaware of persistence or
+        # presentation details so audit/tooling sinks remain decoupled from owners.
         await self.queue.push(event)
 
     async def _consume_loop(self) -> None:

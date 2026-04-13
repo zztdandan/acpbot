@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
-from typing import Any, Awaitable, Callable, cast
+from typing import Awaitable, Callable, cast
+
+from nanobot.acp.contracts import ACPSessionPayload
 
 
-def extract_acp_side_session_ids(payload: Any) -> set[str]:
+def extract_acp_side_session_ids(payload: ACPSessionPayload) -> set[str]:
     """Best-effort extraction of ACP-side session ids from list_sessions payloads."""
 
     ids: set[str] = set()
 
-    def _walk(value: Any) -> None:
+    def _walk(value: ACPSessionPayload) -> None:
         if value is None:
             return
         if hasattr(value, "model_dump"):
@@ -44,10 +46,13 @@ def extract_acp_side_session_ids(payload: Any) -> set[str]:
     return ids
 
 
-async def fetch_acp_side_session_ids(conn: Any, *, cwd: str) -> tuple[set[str], bool]:
+async def fetch_acp_side_session_ids(conn: object, *, cwd: str) -> tuple[set[str], bool]:
     """Fetch ACP session ids for reconciliation if the backend supports it."""
 
-    list_sessions = cast(Callable[..., Awaitable[Any]] | None, getattr(conn, "list_sessions", None))
+    list_sessions = cast(
+        Callable[..., Awaitable[ACPSessionPayload]] | None,
+        getattr(conn, "list_sessions", None),
+    )
     if list_sessions is None:
         return set(), False
 
@@ -65,7 +70,7 @@ async def fetch_acp_side_session_ids(conn: Any, *, cwd: str) -> tuple[set[str], 
                 attempts.append({"cursor": cursor})
             attempts.append({})
 
-            response: Any | None = None
+            response: ACPSessionPayload | None = None
             last_exc: Exception | None = None
             for kwargs in attempts:
                 try:
