@@ -1,93 +1,63 @@
-# nanobot/acp 模块说明（可读性优先）
+# nanobot/acp 架构注入手册（runtime 重构版）
 
-本目录承载 ACP 运行时分发实现。目标不是追求“机械拆文件”，而是持续保证：
+本目录只保留 ACP 新架构代码，不再保留旧 dispatcher family/mixin/history 兼容实现。
 
-- 代码阅读路径清晰（入口薄、路由薄、实现下沉）；
-- 文件结构可理解（按职责家族组织，而不是按历史堆叠）；
-- 对外行为稳定（仅暴露 `ACPDispatcher`，不泄漏内部重构细节）。
+## 1) 当前目标结构
 
-## 与 spec 对齐的结构总览
+- `runtime.py`
+  - `ACPRuntime` / `ACPDispatcher` 主入口
+  - owner：连接生命周期、`request_key -> wait entry`、bus inbound 主循环、统一 completion
+- `runtime_lifecycle.py`
+  - 连接建立、reset、close
+- `runtime_process_manager.py`
+  - owner：按 `nanobot_side_session_key` 串行排队、active request 生命周期、`/stop` 下的排队清理
+- `dispatch_process_direct.py`
+  - 真实 ACP prompt 执行 helper；只服务执行期
+- `runtime_models.py`
+  - runtime/inbound/process/state 共用 dataclass 与 enum
+- `runtime_client.py`
+  - ACP callback -> runtime owner bridge
 
-以下结构与 `docs/superpowers/specs/2026-03-26-acp-package-refactor-design.md` 对齐：
+- `inbound/`
+  - owner：`ProcessDirectInput` / `InboundMessage` -> `InboundContext`
+  - 固定步骤：`normalize -> permission_inbound -> command_router -> media_prepare -> build_process_request`
+  - 只负责 direct response 或 `ProcessRequest` 构造
 
-- 入口与编排
-  - `dispatcher.py`：薄导出层，仅维持历史导入路径兼容。
-  - `dispatcher_core.py`：`ACPDispatcher` 主体壳层（生命周期、编排入口、兼容方法）。
-  - `dispatcher_dispatch.py`：`_dispatch` 主流程编排与异常兜底。
-  - `dispatch_commands.py`：slash 命令路由执行。
-  - `dispatcher_state.py`：dispatcher 运行时状态初始化。
-  - `dispatcher_ports.py`：家族间最小能力端口定义。
+- `sessionmap/`
+  - `binding_manager.py`：绑定真相与持久化
+  - `runtime_manager.py`：当前 runtime 生命周期里的 ready session
+  - `models.py` / `storage.py` / `reconcile.py`：配套模型与持久化/对账 helper
 
-- 运行时与协议 helper
-  - `session_runtime.py`：连接建立、会话确保、prompt 执行与自愈重试。
-  - `session_runtime_mcp.py`：MCP 配置转 ACP schema。
-  - `session_caps.py`：models/agents 能力提取与渲染。
-  - `acp_factory.py`：ACP lazy import 与 block 工厂。
-  - `acp_errors.py`：ACP 错误识别与兼容判断。
+- `state/`
+  - owner：单轮 request 的 state manager、progress router、permission waiter、final materialize
+  - 一轮一建、一轮一销毁
 
-- 五大家族
-  - `session_update_*`：事件路由与 text/media/tool 处理。
-  - `progress_*`：progress/tool_hint 聚合与发布策略。
-  - `media_codec_*`：inbound/outbound 多媒体编解码。
-  - `observability_*`：审计写盘与工具事件结构化。
-  - `session_map_*`：会话映射持久化、对账与 heartbeat。
+- `observability/`
+  - owner：结构化事件 queue 与消费
+  - 业务模块只 push event，不直接耦合 audit/tooling 落地
 
-- 其他基础模块
-  - `state.py`：轻量状态对象与异常容器。
-  - `client.py`：ACP client 回调适配层。
-  - `__init__.py`：仅导出 `ACPDispatcher`。
+## 2) 强约束
 
-## 拆分规则（强制，读写友好优先）
+- 不再新增或恢复旧式根层 family 文件，例如：
+  - `session_update_*`
+  - `progress_*`
+  - `media_codec_*`
+  - `observability_*`
+  - `session_map_*`
+  - `dispatcher_*`（除 `dispatcher.py` 导出兼容层外）
+- 不再新增 runtime 顶层散状态字典来表达 request/session 过程态
+- 不再为旧 ACP 测试、旧 mixin、旧 helper 维持兼容代码
 
-### 1) 入口/路由薄层规则
+## 3) 读写规则
 
-1. `dispatcher.py` 只做导出兼容，不承载业务逻辑。
-2. `dispatcher_core.py` 只做编排与生命周期入口，不承载家族重逻辑。
-3. `*_router.py` 与 dispatch 路由文件只做分发和必要校验，不实现复杂状态机。
+- 入口薄：`dispatcher.py` 仅保留外部导入兼容
+- owner 清晰：runtime / inbound / process manager / sessionmap / state / observability 各自收口
+- 注释优先解释“为什么这样做”，尤其是：
+  - ACP schema 兼容分支
+  - timeout / reset / rebuild 兜底分支
+  - `/stop`、permission、late event 等生命周期边界
 
-### 2) 五家族边界规则
+## 4) 维护要求
 
-1. `session_update_*` 仅处理 ACP 增量事件到内部状态/进度桥接，不处理命令路由和连接初始化。
-2. `progress_*` 仅处理文本/tool_hint 聚合、节流与刷出策略，不解析 ACP update schema。
-3. `media_codec_*` 仅处理媒体内容在 ACP blocks 与本地文件间转换，不承担 session 编排。
-4. `observability_*` 仅处理调试/审计日志、工具事件结构化，不承担业务决策。
-5. `session_map_*` 仅处理 session map 的 load/persist/reconcile/heartbeat，不承担 prompt 主流程。
-
-### 3) 依赖方向规则
-
-1. 允许：`dispatcher_core/dispatcher_dispatch` -> 各 family/helper。
-2. 禁止：family 模块反向依赖 dispatch 主流程模块实现细节。
-3. 跨 family 协作必须通过 dispatcher 字段或 `dispatcher_ports.py` 的最小端口，不做隐式耦合。
-
-### 4) 可读性注释规则
-
-出现以下分支时必须保留中文注释，说明“为什么这样做”：
-
-1. 协议兼容分支（snake/camel、不同 ACP schema 形态）。
-2. 异常兜底分支（自愈重试、降级路径、不中断主链路）。
-3. 状态回退分支（session 失效重建、tool 终态优先刷出等）。
-
-## 非目标与稳定性约束
-
-1. 不引入 channel/session 路由 UI。
-2. 不改变 ACP 与 native 双后端边界。
-3. 不新增对外公开 API，`nanobot.acp` 仅导出 `ACPDispatcher`。
-4. 对外行为必须保持等价：命令语义、session 生命周期、progress/tool_hint/final、审计语义不变。
-
-## 行数阈值说明（辅助信号，不是主目标）
-
-行数阈值只作为“可读性风险信号”，不作为重构目的本身：
-
-1. `>500`：通常表示职责已明显堆叠，应触发拆分审查。
-2. `>350`：建议在 PR/设计说明中明确 keep/split 决策与理由。
-3. 最终决策以“是否提升可读性与边界清晰度”为准，而非单纯压行数。
-
-当前告警记录（Stage-D）：
-
-- `dispatcher_core.py`（363 行）：已下沉 `_dispatch` 到 `dispatcher_dispatch.py`，现保留编排壳层。
-- `session_runtime.py`（367 行）：连接/会话/prompt 自愈状态机耦合较强，当前保持单文件并在后续能力扩展时再分段。
-
-## 维护要求
-
-1. 目录结构或边界规则变更时，必须同步更新本文件。
-2. 任何新拆分都应先满足“读者可快速定位职责”的标准，再考虑形式化指标。
+- 若目录结构或 owner 边界变化，必须同步更新本文件
+- 若重新引入旧家族文件，默认视为架构回退，除非用户明确要求
