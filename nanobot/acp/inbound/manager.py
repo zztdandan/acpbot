@@ -1,4 +1,4 @@
-"""ACP inbound manager with explicit direct and bus entrypoints."""
+"""入站归一化与步骤编排层。"""
 
 from __future__ import annotations
 
@@ -15,9 +15,10 @@ from nanobot.acp.runtime_models import InboundContext, ProcessDirectInput
 
 
 class InboundManager:
-    """Transforms direct/bus inputs into InboundContext and fixed pipeline steps."""
+    """负责对应领域状态与流程编排。"""
 
     def __init__(self, *, runtime) -> None:
+        """初始化当前对象并建立必要状态。"""
         self._runtime = runtime
         self._command_router = CommandRouter(runtime=runtime)
 
@@ -27,8 +28,7 @@ class InboundManager:
         *,
         request_key: str,
     ) -> None:
-        # Direct entry first collapses runtime input into one ctx so it can share the
-        # same pipeline protocol as the bus path instead of keeping two ad-hoc flows.
+        """处理直接入口请求并等待最终结果。"""
         ctx = InboundContext(
             request_key=request_key,
             nanobot_side_session_key=input.nanobot_side_session_key,
@@ -43,9 +43,9 @@ class InboundManager:
         await self._run_pipeline(ctx, steps=self.process_direct_steps())
 
     async def handle_inbound(self, message, *, request_key: str) -> None:
+        """处理总线入口并执行入站流水线。"""
         async def _bus_progress(content: str, **metadata) -> None:
-            # The bus path has no direct caller callback, so bridge state progress here
-            # into bus outbound progress messages.
+            """执行该方法定义的处理流程并返回结果。"""
             outbound = self._runtime.new_outbound_message(
                 channel=message.channel,
                 chat_id=message.chat_id,
@@ -69,6 +69,7 @@ class InboundManager:
         await self._run_pipeline(ctx, steps=self.bus_inbound_steps())
 
     def process_direct_steps(self) -> list[InboundStep]:
+        """处理直接入口请求并等待最终结果。"""
         return [
             build_normalize_step(self._runtime),
             build_command_router_step(self._command_router),
@@ -77,6 +78,7 @@ class InboundManager:
         ]
 
     def bus_inbound_steps(self) -> list[InboundStep]:
+        """构建总线入口步骤列表。"""
         return [
             build_normalize_step(self._runtime),
             build_permission_inbound_step(self._runtime),
@@ -86,11 +88,10 @@ class InboundManager:
         ]
 
     async def _run_pipeline(self, ctx: InboundContext, *, steps: list[InboundStep]) -> None:
+        """启动主循环并持续消费入站消息。"""
         for step in steps:
             await step(ctx)
             if ctx.direct_response is not None:
-                # Inbound may decide on a direct return, but it still must finish through
-                # the unified completion entrypoint instead of touching runtime wait maps.
                 await self._runtime.complete_process_request(
                     ctx.request_key,
                     outbound=ctx.direct_response,
@@ -98,6 +99,4 @@ class InboundManager:
                 return
         if ctx.process_request is None:
             raise RuntimeError("inbound finished without process request")
-        # Without a direct response, inbound stops here and ProcessRuntimeManager takes
-        # over the active/queue lifecycle.
         await self._runtime.process_runtime_manager.enqueue(ctx.process_request)

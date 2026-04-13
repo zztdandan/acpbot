@@ -1,4 +1,4 @@
-"""Inbound media normalization for ACP runtime."""
+"""入站归一化与步骤编排层。"""
 
 from __future__ import annotations
 
@@ -18,10 +18,8 @@ def normalize_inbound_media_paths(
     nanobot_side_session_key: str,
     channel: str,
 ) -> list[Path]:
-    """Normalize inbound media to safe workspace-local file paths."""
+    """执行该方法定义的处理流程并返回结果。"""
 
-    # Inbound media may only reference existing files inside the workspace so later
-    # prompt-block building cannot reach outside the allowed project boundary.
     workspace = workspace.resolve()
     normalized: list[Path] = []
     for raw_media in media:
@@ -70,10 +68,8 @@ def build_media_artifacts(
     nanobot_side_session_key: str,
     channel: str,
 ) -> ACPArtifactList:
-    """Prepare safe media artifacts for the execution-stage prompt builder."""
+    """执行该方法定义的处理流程并返回结果。"""
 
-    # These artifacts are execution-stage inputs only. They do not imply that ACP prompt
-    # blocks have already been built; block assembly still happens in the execution helper.
     artifacts: list[ACPArtifactMap] = []
     for path in normalize_inbound_media_paths(
         workspace=workspace,

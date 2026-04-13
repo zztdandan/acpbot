@@ -1,4 +1,4 @@
-"""Permission event models owned by request-scoped state."""
+"""权限事件模型。"""
 
 from __future__ import annotations
 
@@ -9,8 +9,11 @@ from nanobot.acp.contracts import ACPPermissionOption, ACPToolCall
 
 @dataclass(slots=True)
 class PendingPermissionRequest:
-    """Active permission request waiting for an inbound reply."""
+    """等待用户回复的权限请求。"""
 
     options: list[ACPPermissionOption]
+    # 可选权限项。
     tool_call: ACPToolCall | None = None
+    # 关联工具调用信息。
     prompt_text: str = ""
+    # 对外提示文本。

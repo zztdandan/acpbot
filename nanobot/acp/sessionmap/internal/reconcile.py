@@ -1,4 +1,4 @@
-"""Reconciliation helpers for ACP binding truth and remote session listings."""
+"""会话绑定真相与运行态映射层。"""
 
 from __future__ import annotations
 
@@ -8,11 +8,12 @@ from nanobot.acp.contracts import ACPSessionPayload
 
 
 def extract_acp_side_session_ids(payload: ACPSessionPayload) -> set[str]:
-    """Best-effort extraction of ACP-side session ids from list_sessions payloads."""
+    """执行该方法定义的处理流程并返回结果。"""
 
     ids: set[str] = set()
 
     def _walk(value: ACPSessionPayload) -> None:
+        """执行该方法定义的处理流程并返回结果。"""
         if value is None:
             return
         if hasattr(value, "model_dump"):
@@ -47,7 +48,7 @@ def extract_acp_side_session_ids(payload: ACPSessionPayload) -> set[str]:
 
 
 async def fetch_acp_side_session_ids(conn: object, *, cwd: str) -> tuple[set[str], bool]:
-    """Fetch ACP session ids for reconciliation if the backend supports it."""
+    """执行该方法定义的处理流程并返回结果。"""
 
     list_sessions = cast(
         Callable[..., Awaitable[ACPSessionPayload]] | None,
@@ -57,6 +58,7 @@ async def fetch_acp_side_session_ids(conn: object, *, cwd: str) -> tuple[set[str
         return set(), False
 
     async def _collect(cwd_arg: str | None) -> set[str]:
+        """执行该方法定义的处理流程并返回结果。"""
         collected: set[str] = set()
         cursor: str | None = None
         seen_cursors: set[str] = set()

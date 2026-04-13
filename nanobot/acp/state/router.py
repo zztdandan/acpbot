@@ -1,4 +1,4 @@
-"""ACP state router and progress mirroring boundary."""
+"""单请求状态聚合与进度发布层。"""
 
 from __future__ import annotations
 
@@ -13,22 +13,22 @@ if TYPE_CHECKING:
 
 
 class ProgressRouter:
-    """State-owned progress sink that mirrors structured facts to on_progress."""
+    """负责事件路由与进度输出编排。"""
 
     def __init__(self, *, state_manager: SessionStateManager) -> None:
+        """初始化当前对象并建立必要状态。"""
         self._state_manager = state_manager
         self._closed = False
 
     async def emit(self, result: FlushResult | None) -> None:
+        """执行该方法定义的处理流程并返回结果。"""
         if self._closed or result is None:
             return
-        # The router turns pool flush results into one outward progress payload shape.
-        # Individual handlers and pools must not call `on_progress` on their own.
         content, metadata, _media = build_progress_payload(result)
         await self._state_manager.emit_progress(content=content, metadata=metadata)
 
     async def flush_all(self) -> None:
-        """Flush all known pools through the centralized progress sink."""
+        """执行该方法定义的处理流程并返回结果。"""
 
         pools = (
             self._state_manager.message_text_pool,
@@ -40,10 +40,9 @@ class ProgressRouter:
             await self.emit(pool.flush())
 
     async def close(self) -> None:
+        """关闭运行时并释放资源。"""
         if self._closed:
             return
-        # Close performs a final tail flush so the last text/media/tool/permission batch
-        # is not lost during request shutdown.
         pools = (
             self._state_manager.message_text_pool,
             self._state_manager.media_pool,
@@ -55,5 +54,4 @@ class ProgressRouter:
         self._closed = True
 
 
-# Re-export concrete pools so reader-facing API stays near the router boundary.
 __all__ = ["MediaPool", "MessageTextPool", "PermissionPool", "ProgressRouter", "ToolPool"]

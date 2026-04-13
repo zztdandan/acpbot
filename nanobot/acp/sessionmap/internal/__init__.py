@@ -1,1 +1,1 @@
-"""Internal helpers for sessionmap persistence and reconciliation."""
+"""会话绑定真相与运行态映射层。"""

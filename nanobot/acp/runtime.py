@@ -1,4 +1,4 @@
-"""ACP runtime main entrypoint."""
+"""运行时主入口与请求等待主链。"""
 
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ else:
 
 
 class ACPRuntime:
-    """The ACP backend runtime owner defined by the ACP redesign docs."""
+    """负责运行时主链路编排与资源生命周期。"""
 
     def __init__(
         self,
@@ -58,32 +58,21 @@ class ACPRuntime:
         acp_config: ACPBackendConfig,
         channels_config: ChannelsConfig | None = None,
     ) -> None:
+        """初始化当前对象并建立必要状态。"""
         self.bus = bus
         self.workspace = workspace
         self.acp_config = acp_config
         self.channels_config = channels_config
         self._running = False
-        # Keep the SDK-owned async context manager so runtime close/reset can exit the
-        # transport, RPC connection, and spawned ACP process as one lifecycle unit.
         self._acp_client_connection_cm: (
             AsyncContextManager[tuple[ClientSideConnection, asyncio.subprocess.Process]] | None
         ) = None
-        # This is nanobot's single client->agent RPC handle for initialize,
-        # new_session, prompt, and later session-level control methods.
         self._acp_client_conn: ClientSideConnection | None = None
-        # Keep the subprocess handle explicitly so reset/close/diagnostics can reason
-        # about the remote agent process and the RPC connection together.
         self._acp_agent_process: asyncio.subprocess.Process | None = None
-        # Connection ensure/reset/cleanup must stay serialized or the runtime can end
-        # up in a half-connected generation, so runtime owns the lifecycle lock.
         self._acp_connection_lock = asyncio.Lock()
-        # The callback bridge exists only to route agent->client callbacks back to the
-        # runtime owner instead of letting session_update/request_permission fan out.
         self.acp_callback_client: _NanobotACPClient | None = None
         self._wait_by_request_key: dict[str, RuntimeWaitEntry] = {}
 
-        # Runtime owns only the top-level coordinators. Request queueing, request state,
-        # and binding truth stay in their dedicated owners to avoid new top-level maps.
         self.observability_manager = ObservabilityManager()
         self.sessionmap_binding_manager = SessionMapBindingManager(self)
         self.session_runtime_manager = SessionRuntimeManager(
@@ -94,22 +83,20 @@ class ACPRuntime:
         self.inbound_manager = InboundManager(runtime=self)
 
     def new_request_key(self) -> str:
+        """生成请求唯一键。"""
         return f"acp:{uuid4().hex}"
 
     async def await_acp_prompt(self, **kwargs: object) -> None:
-        """Await one ACP prompt call under a bounded timeout."""
+        """等待一次协议提示执行完成。"""
 
         if self._acp_client_conn is None:
             raise RuntimeError("ACP connection is not available")
-        # Real prompt execution must stay bounded or both direct and bus wait chains can
-        # hang forever before unified completion fires.
         timeout = max(30, self.acp_config.startup_timeout_seconds)
         prompt_callable = cast(Callable[..., Awaitable[None]], self._acp_client_conn.prompt)
         await asyncio.wait_for(prompt_callable(**kwargs), timeout=timeout)
 
     def register_wait_entry(self, request_key: str) -> RuntimeWaitEntry:
-        # Runtime only tracks the request_key -> future await relation. Execution-state
-        # details belong to ProcessRuntimeManager.
+        """注册请求等待条目。"""
         wait_entry = RuntimeWaitEntry(
             request_key=request_key,
             done_future=asyncio.get_running_loop().create_future(),
@@ -118,10 +105,11 @@ class ACPRuntime:
         return wait_entry
 
     def remove_wait_entry(self, request_key: str) -> None:
+        """移除请求等待条目。"""
         self._wait_by_request_key.pop(request_key, None)
 
     def fail_all_wait_entries(self, error: Exception) -> None:
-        """Fail all unresolved wait entries during runtime rebuild/reset."""
+        """使全部等待条目以异常结束。"""
 
         for wait_entry in self._wait_by_request_key.values():
             if not wait_entry.done_future.done():
@@ -134,8 +122,7 @@ class ACPRuntime:
         outbound: OutboundMessage | None = None,
         error: Exception | None = None,
     ) -> None:
-        # All direct responses, normal completions, and failure completions converge here
-        # so runtime keeps one completion entrypoint and inbound/state never touch wait maps.
+        """执行该方法定义的处理流程并返回结果。"""
         wait_entry = self._wait_by_request_key.get(request_key)
         if wait_entry is None or wait_entry.done_future.done():
             return
@@ -148,25 +135,28 @@ class ACPRuntime:
         wait_entry.done_future.set_result(outbound)
 
     async def ensure_connection(self) -> None:
+        """确保协议连接处于可用状态。"""
         await ensure_connection(self)
 
     async def reset_connection(self) -> None:
+        """重置协议连接并清理代际状态。"""
         await reset_connection(self)
 
     async def run(self) -> None:
+        """启动主循环并持续消费入站消息。"""
         self._running = True
         await self.ensure_connection()
         await self.observability_manager.start()
         while self._running:
-            # Bus inbound no longer routes through legacy dispatcher helpers. Runtime
-            # generates the request_key and sends both entry paths through one wait chain.
             message = await self.bus.consume_inbound()
             asyncio.create_task(self.dispatch_inbound(message))
 
     async def stop(self) -> None:
+        """请求停止主循环。"""
         self._running = False
 
     async def close(self) -> None:
+        """关闭运行时并释放资源。"""
         await close_runtime(self)
 
     async def process_direct(
@@ -180,12 +170,11 @@ class ACPRuntime:
         preferred_agent: str | None = None,
         on_progress: Callable[[str], Awaitable[None]] | None = None,
     ) -> OutboundMessage:
+        """处理直接入口请求并等待最终结果。"""
         await self.observability_manager.start()
         request_key = self.new_request_key()
         wait_entry = self.register_wait_entry(request_key)
         try:
-            # Direct input first collapses scattered parameters into one runtime-level
-            # object so inbound can normalize both entry paths through InboundContext.
             input = ProcessDirectInput(
                 content=content,
                 nanobot_side_session_key=session_key,
@@ -199,19 +188,16 @@ class ACPRuntime:
                 on_progress=on_progress,
             )
             await self.inbound_manager.handle_process_direct(input, request_key=request_key)
-            # Runtime waits only for the final result. Queueing, activation, and state
-            # shutdown remain below this layer.
             return await wait_entry.done_future
         finally:
             self.remove_wait_entry(request_key)
 
     async def dispatch_inbound(self, message: InboundMessage) -> None:
+        """处理总线入站消息并发布最终结果。"""
         await self.observability_manager.start()
         request_key = self.new_request_key()
         wait_entry = self.register_wait_entry(request_key)
         try:
-            # Bus and direct share the same request_key, wait-entry, and completion path.
-            # The only difference is direct returns while bus publishes.
             await self.inbound_manager.handle_inbound(message, request_key=request_key)
             outbound = await wait_entry.done_future
             await self.publish_final_outbound(message=message, outbound=outbound)
@@ -232,8 +218,7 @@ class ACPRuntime:
     async def publish_final_outbound(
         self, *, message: InboundMessage, outbound: OutboundMessage
     ) -> None:
-        # Final publish belongs to the bus path's consumer step. It stays outside
-        # complete_process_request() so completion and outward delivery remain separate.
+        """将最终出站消息发布到总线。"""
         final_metadata = dict(message.metadata or {})
         final_metadata.update(outbound.metadata or {})
         await self.bus.publish_outbound(
@@ -249,8 +234,7 @@ class ACPRuntime:
     async def handle_session_update(
         self, *, acp_side_session_id: str, update: ACPCallbackUpdate
     ) -> None:
-        # Runtime only dispatches by owner boundary: resolve the active request from
-        # acp_side_session_id, hand the update to that request state, or record it as orphaned.
+        """接收会话更新并转发给目标状态。"""
         active_entry = self.process_runtime_manager.get_active_by_acp_side_session_id(
             acp_side_session_id
         )
@@ -275,8 +259,7 @@ class ACPRuntime:
         options: list[ACPPermissionOption],
         tool_call: ACPToolCall,
     ) -> object:
-        # Permission callbacks also avoid business decisions at runtime level. Runtime
-        # only forwards the request to the active request-owned state machine.
+        """处理权限请求并返回权限结果。"""
         active_entry = self.process_runtime_manager.get_active_by_acp_side_session_id(
             acp_side_session_id
         )
@@ -294,6 +277,7 @@ class ACPRuntime:
         )
 
     async def permission_response(self, options: list[ACPPermissionOption]) -> object:
+        """按策略生成权限响应载荷。"""
         from acp.schema import RequestPermissionResponse
 
         policy = self.acp_config.permissions_policy
@@ -319,9 +303,8 @@ class ACPRuntime:
         )
 
     async def stop_session(self, *, nanobot_side_session_key: str) -> StopResult:
+        """停止指定会话的活跃与排队请求。"""
         await self.ensure_sessionmap_truth_loaded()
-        # `/stop` resolves identity truth from sessionmap, while active/queued execution
-        # truth still belongs exclusively to ProcessRuntimeManager.
         acp_side_session_id = self.sessionmap_binding_manager.resolve_session_id(
             nanobot_side_session_key
         )
@@ -342,7 +325,7 @@ class ACPRuntime:
     def drop_session_binding_and_runtime_entry(
         self, *, nanobot_side_session_key: str
     ) -> str | None:
-        """Drop binding truth and runtime-ready entry together to force a fresh session."""
+        """启动主循环并持续消费入站消息。"""
 
         self.session_runtime_manager.drop_ready_session(
             nanobot_side_session_key=nanobot_side_session_key,
@@ -350,16 +333,18 @@ class ACPRuntime:
         return self.sessionmap_binding_manager.clear_binding(nanobot_side_session_key)
 
     async def ensure_sessionmap_truth_loaded(self) -> None:
-        """Load binding truth even when commands run before ACP bootstrap."""
+        """执行该方法定义的处理流程并返回结果。"""
 
         await self.sessionmap_binding_manager.load_persistent_truth()
 
     def resolve_nanobot_side_session_key(self, message: InboundMessage) -> str:
+        """解析业务侧会话主键。"""
         if message.channel == ACPChannelName.SYSTEM.value:
             return message.chat_id if ":" in message.chat_id else f"cli:{message.chat_id}"
         return message.session_key
 
     async def push_observability(self, event: ObservabilityEvent) -> None:
+        """上报结构化观测事件。"""
         await self.observability_manager.push(event)
 
     def new_observability_event(
@@ -372,6 +357,7 @@ class ACPRuntime:
         acp_side_session_id: str | None = None,
         payload: JSONMap | None = None,
     ) -> ObservabilityEvent:
+        """构造结构化观测事件对象。"""
         return ObservabilityEvent(
             scope=scope,
             event=event,
@@ -383,18 +369,21 @@ class ACPRuntime:
 
     @staticmethod
     def new_outbound_message(*, channel: str, chat_id: str, content: str) -> OutboundMessage:
+        """构造基础出站消息对象。"""
         return OutboundMessage(channel=channel, chat_id=chat_id, content=content)
 
     async def list_models_command(self, acp_side_session_id: str) -> str:
+        """返回当前会话可用模型列表。"""
         return self.session_runtime_manager.render_models_command(
             acp_side_session_id=acp_side_session_id
         )
 
     async def list_agents_command(self, acp_side_session_id: str) -> str:
+        """返回当前会话可用代理列表。"""
         return self.session_runtime_manager.render_agents_command(
             acp_side_session_id=acp_side_session_id
         )
 
 
 class ACPDispatcher(ACPRuntime):
-    """Compatibility class name preserved for external callers and CLI wiring."""
+    """负责本对象定义的职责边界与生命周期。"""

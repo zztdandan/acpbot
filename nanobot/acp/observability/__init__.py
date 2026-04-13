@@ -1,4 +1,4 @@
-"""ACP observability package exports."""
+"""结构化观测事件记录层。"""
 
 from nanobot.acp.observability.manager import ObservabilityManager
 from nanobot.acp.observability.queue import ObservabilityEvent, ObservabilityQueue

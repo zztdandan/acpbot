@@ -1,4 +1,4 @@
-"""Session binding truth manager for ACP runtime."""
+"""会话绑定真相与运行态映射层。"""
 
 from __future__ import annotations
 
@@ -22,22 +22,26 @@ if TYPE_CHECKING:
 
 
 def _now_iso_with_tz() -> str:
+    """执行该方法定义的处理流程并返回结果。"""
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
 class SessionMapBindingManager:
-    """Owns persistent session binding truth and activation replay logic."""
+    """负责对应领域状态与流程编排。"""
 
     def __init__(self, owner: ACPRuntime) -> None:
+        """初始化当前对象并建立必要状态。"""
         self._owner = owner
         self._session_map_file = get_data_dir() / "acp" / "session_map.json"
         self._entries: dict[str, SessionMapBindingEntry] = {}
         self._bootstrapped = False
 
     def mark_unbootstrapped(self) -> None:
+        """执行该方法定义的处理流程并返回结果。"""
         self._bootstrapped = False
 
     def _resolved_acp_cwd(self) -> str:
+        """执行该方法定义的处理流程并返回结果。"""
         cwd = (
             Path(self._owner.acp_config.cwd).expanduser()
             if self._owner.acp_config.cwd
@@ -47,6 +51,7 @@ class SessionMapBindingManager:
 
     @staticmethod
     def _parse_entry(raw: object) -> SessionMapBindingEntry:
+        """执行该方法定义的处理流程并返回结果。"""
         if not isinstance(raw, dict):
             raise ValueError("session map entry is not object")
         cwd = raw.get("cwd")
@@ -77,6 +82,7 @@ class SessionMapBindingManager:
         )
 
     def _load_entries_from_disk(self) -> dict[str, SessionMapBindingEntry]:
+        """执行该方法定义的处理流程并返回结果。"""
         payload = read_sessionmap_payload(self._session_map_file)
         current_cwd = self._resolved_acp_cwd()
         loaded: dict[str, SessionMapBindingEntry] = {}
@@ -89,8 +95,7 @@ class SessionMapBindingManager:
         return loaded
 
     def persist(self) -> None:
-        # Binding manager is the source of truth across runtime generations, so every
-        # replay-relevant selection or binding change must persist immediately.
+        """持久化当前绑定真相。"""
         write_sessionmap_payload(
             self._session_map_file,
             current_cwd=self._resolved_acp_cwd(),
@@ -98,30 +103,32 @@ class SessionMapBindingManager:
         )
 
     def resolve_session_id(self, nanobot_side_session_key: str) -> str | None:
+        """执行该方法定义的处理流程并返回结果。"""
         entry = self._entries.get(nanobot_side_session_key)
         return entry.acp_side_session_id if entry is not None else None
 
     def get_bound_selection(self, nanobot_side_session_key: str) -> tuple[str | None, str | None]:
+        """执行该方法定义的处理流程并返回结果。"""
         entry = self._entries.get(nanobot_side_session_key)
         if entry is None:
             return None, None
         return entry.bound_model, entry.bound_agent
 
     def iter_entries(self) -> list[SessionMapBindingEntry]:
-        """Return a stable snapshot of current binding truth entries."""
+        """执行该方法定义的处理流程并返回结果。"""
 
         return [entry for _, entry in sorted(self._entries.items())]
 
     def clear_binding(self, nanobot_side_session_key: str) -> str | None:
+        """清除指定会话的绑定真相。"""
         old = self._entries.pop(nanobot_side_session_key, None)
         self.persist()
         return old.acp_side_session_id if old is not None else None
 
     def bind_session(self, nanobot_side_session_key: str, acp_side_session_id: str) -> None:
+        """建立业务会话与协议会话绑定。"""
         current_cwd = self._resolved_acp_cwd()
         now = _now_iso_with_tz()
-        # One acp_side_session_id may belong to only one nanobot session. Remove reverse
-        # conflicts first to preserve one-to-one binding truth semantics.
         for existing_key, entry in list(self._entries.items()):
             if (
                 existing_key != nanobot_side_session_key
@@ -149,6 +156,7 @@ class SessionMapBindingManager:
         self.persist()
 
     def update_bound_model(self, nanobot_side_session_key: str, model: str) -> None:
+        """更新绑定模型信息。"""
         entry = self._entries.get(nanobot_side_session_key)
         if entry is None or entry.bound_model == model:
             return
@@ -158,6 +166,7 @@ class SessionMapBindingManager:
         self.persist()
 
     def update_bound_agent(self, nanobot_side_session_key: str, agent: str) -> None:
+        """更新绑定代理信息。"""
         entry = self._entries.get(nanobot_side_session_key)
         if entry is None or entry.bound_agent == agent:
             return
@@ -169,10 +178,8 @@ class SessionMapBindingManager:
     async def activate_session(
         self, nanobot_side_session_key: str, acp_side_session_id: str
     ) -> tuple[bool, ACPSessionPayload | None]:
-        """Resume/load the ACP-side session and replay bound selection if possible."""
+        """执行该方法定义的处理流程并返回结果。"""
 
-        # Binding manager owns only persisted truth and activation replay. Whether the
-        # activated session becomes runtime-ready is decided by SessionRuntimeManager.
         conn = self._owner._acp_client_conn
         if conn is None:
             raise RuntimeError("ACP connection is not available")
@@ -226,8 +233,7 @@ class SessionMapBindingManager:
         nanobot_side_session_key: str,
         acp_side_session_id: str,
     ) -> bool:
-        # resume/load restores only the ACP-side session entity. User-visible continuity
-        # still depends on replaying bound model and bound agent into the new connection.
+        """执行该方法定义的处理流程并返回结果。"""
         conn = self._owner._acp_client_conn
         if conn is None:
             raise RuntimeError("ACP connection is not available")
@@ -263,7 +269,7 @@ class SessionMapBindingManager:
             return False
 
     async def bootstrap(self) -> list[str]:
-        """Load persisted bindings, reconcile them, and replay activation once."""
+        """执行该方法定义的处理流程并返回结果。"""
 
         if self._bootstrapped:
             return []
@@ -281,12 +287,10 @@ class SessionMapBindingManager:
         return ok_keys
 
     async def load_persistent_truth(self) -> None:
-        """Load and reconcile binding truth without creating runtime-ready entries."""
+        """持久化当前绑定真相。"""
 
         if self._bootstrapped:
             return
-        # Deliberately load and reconcile truth only here without auto-activating ready
-        # sessions so runtime rebuild still honors lazy ensure on the next request.
         self._entries = self._load_entries_from_disk()
         deduped: dict[str, SessionMapBindingEntry] = {}
         by_acp_side_session_id: dict[str, SessionMapBindingEntry] = {}
@@ -301,6 +305,7 @@ class SessionMapBindingManager:
         self._bootstrapped = True
 
     async def _reconcile_entries(self) -> None:
+        """执行该方法定义的处理流程并返回结果。"""
         conn = self._owner._acp_client_conn
         if conn is None or not self._entries:
             return

@@ -1,4 +1,4 @@
-"""Additional tooling hooks for ACP observability events."""
+"""结构化观测事件记录层。"""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from nanobot.acp.observability.queue import ObservabilityEvent
 
 
 def emit_tooling_event(event: ObservabilityEvent) -> None:
-    """Emit an info-level tooling summary for ACP event consumers."""
+    """执行该方法定义的处理流程并返回结果。"""
 
     logger.info(
         "ACP event scope={} event={} request_key={} session={} acp_session={} payload_keys={}",

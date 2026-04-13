@@ -1,4 +1,4 @@
-"""Inbound slash command router."""
+"""入站归一化与步骤编排层。"""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
 
 class CommandRouter:
-    """Handles ACP slash commands as inbound direct responses."""
+    """负责事件路由与进度输出编排。"""
 
     HELP_TEXT = (
         "🐈 nanobot commands:\n"
@@ -26,10 +26,12 @@ class CommandRouter:
     )
 
     def __init__(self, *, runtime: ACPRuntime) -> None:
+        """初始化当前对象并建立必要状态。"""
         self._runtime = runtime
 
     @staticmethod
     def parse_command(content: str) -> tuple[str, str]:
+        """解析命令输入并返回命令信息。"""
         raw = content.strip()
         if not raw:
             return "", ""
@@ -37,6 +39,7 @@ class CommandRouter:
         return parts[0].lower(), parts[1].strip() if len(parts) > 1 else ""
 
     async def maybe_handle(self, ctx: InboundContext) -> OutboundMessage | None:
+        """尝试处理命令并返回是否直返。"""
         command, arg = self.parse_command(ctx.content)
         if not command.startswith("/"):
             return None
@@ -44,8 +47,6 @@ class CommandRouter:
         if command == "/help":
             return self._reply(ctx, self.HELP_TEXT)
         if command == "/new":
-            # `/new` is not just a binding delete. It first stops active/queued work for
-            # the same session, then drops binding truth and runtime-ready state.
             await self._runtime.ensure_sessionmap_truth_loaded()
             await self._runtime.stop_session(nanobot_side_session_key=ctx.nanobot_side_session_key)
             old_acp_side_session_id = self._runtime.drop_session_binding_and_runtime_entry(
@@ -72,8 +73,6 @@ class CommandRouter:
             if not arg:
                 return self._reply(ctx, "Usage: /set_model <model_id>")
             await self._runtime.ensure_connection()
-            # Command-driven selection changes must update the current ready session and
-            # the mirrored binding/runtime state so reconnects do not fall back.
             acp_side_session_id = await self._runtime.session_runtime_manager.ensure_ready_session(
                 nanobot_side_session_key=ctx.nanobot_side_session_key,
             )
@@ -121,8 +120,6 @@ class CommandRouter:
             )
             return self._reply(ctx, f"Agent switched to: {arg}")
         if command == "/stop":
-            # The command layer only produces a user-visible acknowledgement. Real stop
-            # decisions and execution remain inside runtime/process manager owners.
             result = await self._runtime.stop_session(
                 nanobot_side_session_key=ctx.nanobot_side_session_key,
             )
@@ -137,6 +134,7 @@ class CommandRouter:
 
     @staticmethod
     def _reply(ctx: InboundContext, content: str) -> OutboundMessage:
+        """构造命令回复消息。"""
         return OutboundMessage(
             channel=ctx.channel,
             chat_id=ctx.chat_id,

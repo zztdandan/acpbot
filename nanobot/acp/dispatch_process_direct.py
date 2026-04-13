@@ -1,4 +1,4 @@
-"""Execution-stage helpers for ACP process requests."""
+"""该模块承接重构后的职责边界。"""
 
 from __future__ import annotations
 
@@ -16,10 +16,8 @@ if TYPE_CHECKING:
 
 
 def build_prompt_blocks(process_request: ProcessRequest) -> list[object]:
-    """Build ACP prompt blocks only for the real execution path."""
+    """执行该方法定义的处理流程并返回结果。"""
 
-    # Prompt-block building belongs strictly to the execution stage so runtime and
-    # inbound do not grow back into low-level detail owners.
     blocks: list[object] = [_acp_text_block(process_request.content)]
     raw_media_artifacts = process_request.artifacts.get("media_artifacts", [])
     media_artifacts: ACPArtifactList = (
@@ -43,13 +41,11 @@ def build_prompt_blocks(process_request: ProcessRequest) -> list[object]:
 async def execute_process_request(
     runtime: ACPRuntime, active_entry: ActiveProcessEntry
 ) -> OutboundMessage:
-    """Execute one ACP prompt against a ready ACP session and let callbacks fill state."""
+    """执行该方法定义的处理流程并返回结果。"""
 
     if runtime._acp_client_conn is None:
         raise RuntimeError("ACP connection is not available")
     process_request = active_entry.process_request
-    # Forward the ready session's model/agent selection to ACP prompt so execution
-    # uses the same selection facts that session replay established.
     prompt_meta: JSONMap = runtime.session_runtime_manager.build_prompt_metadata(
         acp_side_session_id=active_entry.acp_side_session_id
     )
@@ -62,14 +58,10 @@ async def execute_process_request(
         )
         return active_entry.state_manager.materialize_final_outbound(partial=False)
     except Exception as exc:
-        # `invalid params` usually means the historical session truth is stale, so drop
-        # both binding truth and runtime-ready state to force a fresh ensure next time.
         if _is_invalid_params_request_error(exc):
             runtime.drop_session_binding_and_runtime_entry(
                 nanobot_side_session_key=process_request.nanobot_side_session_key,
             )
-        # Even on execution failure, prefer materializing a partial response from state so
-        # partial fallback remains a state-owned responsibility.
         partial = active_entry.state_manager.materialize_final_outbound(partial=True)
         if partial.content or partial.media:
             raise _ACPDispatchError(partial_response=partial.content) from exc

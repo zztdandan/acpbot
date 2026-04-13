@@ -1,8 +1,4 @@
-"""ACP lazy-import factory helpers.
-
-These wrappers centralize ACP schema/block lazy imports so individual modules do
-not repeat `import_module("acp")` or hard-import the SDK too early.
-"""
+"""该模块承接重构后的职责边界。"""
 
 from __future__ import annotations
 
@@ -12,17 +8,17 @@ from nanobot.acp.contracts import ACPFactoryValue
 
 
 def _acp_spawn_agent_process() -> ACPFactoryValue:
-    """Lazy-import the ACP process spawn factory."""
+    """执行该方法定义的处理流程并返回结果。"""
     return import_module("acp").spawn_agent_process
 
 
 def _acp_text_block(content: str) -> ACPFactoryValue:
-    """Lazy-import ACP `text_block`."""
+    """执行该方法定义的处理流程并返回结果。"""
     return import_module("acp").text_block(content)
 
 
 def _acp_image_block(data: str, mime_type: str, *, uri: str | None = None) -> ACPFactoryValue:
-    """Lazy-import ACP `image_block`."""
+    """执行该方法定义的处理流程并返回结果。"""
     return import_module("acp").image_block(data=data, mime_type=mime_type, uri=uri)
 
 
@@ -33,7 +29,7 @@ def _acp_resource_link_block(
     mime_type: str | None,
     size: int | None,
 ) -> ACPFactoryValue:
-    """Lazy-import ACP `resource_link_block`."""
+    """执行该方法定义的处理流程并返回结果。"""
     return import_module("acp").resource_link_block(
         name=name,
         uri=uri,
@@ -44,15 +40,15 @@ def _acp_resource_link_block(
 
 
 def _acp_embedded_text_resource(uri: str, text: str, *, mime_type: str | None) -> ACPFactoryValue:
-    """Lazy-import ACP `embedded_text_resource`."""
+    """执行该方法定义的处理流程并返回结果。"""
     return import_module("acp").embedded_text_resource(uri=uri, text=text, mime_type=mime_type)
 
 
 def _acp_embedded_blob_resource(uri: str, blob: str, *, mime_type: str | None) -> ACPFactoryValue:
-    """Lazy-import ACP `embedded_blob_resource`."""
+    """执行该方法定义的处理流程并返回结果。"""
     return import_module("acp").embedded_blob_resource(uri=uri, blob=blob, mime_type=mime_type)
 
 
 def _acp_resource_block(resource: ACPFactoryValue) -> ACPFactoryValue:
-    """Lazy-import ACP `resource_block`."""
+    """执行该方法定义的处理流程并返回结果。"""
     return import_module("acp").resource_block(resource=resource)

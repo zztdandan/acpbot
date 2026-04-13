@@ -1,4 +1,4 @@
-"""Sessionmap package exports."""
+"""会话绑定真相与运行态映射层。"""
 
 from nanobot.acp.sessionmap.binding_manager import SessionMapBindingManager
 from nanobot.acp.sessionmap.models import (

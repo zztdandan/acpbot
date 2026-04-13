@@ -1,4 +1,4 @@
-"""Session capability helpers kept internal to sessionmap-driven ACP flows."""
+"""会话绑定真相与运行态映射层。"""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from nanobot.acp.sessionmap.models import _SessionCapabilities
 
 
 def _pick(obj: ACPSessionPayload, *names: str) -> ACPSessionPayload:
-    """Return the first matching snake_case/camelCase attribute if present."""
+    """执行该方法定义的处理流程并返回结果。"""
 
     for name in names:
         if hasattr(obj, name):
@@ -19,7 +19,7 @@ def _update_caps_from_session_payload(
     caps: _SessionCapabilities,
     payload: ACPSessionPayload,
 ) -> None:
-    """Extract model/agent capability caches from an ACP session payload."""
+    """执行该方法定义的处理流程并返回结果。"""
 
     models = _pick(payload, "models")
     if models is not None:
@@ -53,7 +53,7 @@ def _update_caps_from_session_payload(
 def _render_models_command(
     caps: _SessionCapabilities | None,
 ) -> str:
-    """Format the model catalog for the current session."""
+    """执行该方法定义的处理流程并返回结果。"""
 
     if not caps or not caps.available_models:
         return "No model catalog returned by current ACP backend for this session."
@@ -69,7 +69,7 @@ def _render_models_command(
 def _render_agents_command(
     caps: _SessionCapabilities | None,
 ) -> str:
-    """Format the agent/mode catalog for the current session."""
+    """执行该方法定义的处理流程并返回结果。"""
 
     if not caps or not caps.available_agents:
         return "No agent/mode catalog returned by current ACP backend for this session."
@@ -83,7 +83,7 @@ def _render_agents_command(
 
 
 def _build_prompt_metadata(caps: _SessionCapabilities | None) -> JSONMap:
-    """Build prompt metadata from runtime capability cache."""
+    """执行该方法定义的处理流程并返回结果。"""
 
     prompt_meta: JSONMap = {}
     if caps is not None and isinstance(caps.current_model, str) and caps.current_model:

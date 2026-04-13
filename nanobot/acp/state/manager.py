@@ -1,4 +1,4 @@
-"""Request-scoped ACP state manager."""
+"""单请求状态聚合与进度发布层。"""
 
 from __future__ import annotations
 
@@ -30,11 +30,15 @@ if TYPE_CHECKING:
 
 
 class _RuntimeObservabilityOwner(Protocol):
-    async def push_observability(self, event: ObservabilityEvent) -> None: ...
+    """运行时观测事件上报协议。"""
+
+    async def push_observability(self, event: ObservabilityEvent) -> None:
+        """上报一条结构化观测事件。"""
+        ...
 
 
 class SessionStateManager:
-    """Owns all request-scoped state for one active ACP process request."""
+    """负责对应领域状态与流程编排。"""
 
     def __init__(
         self,
@@ -47,6 +51,7 @@ class SessionStateManager:
         chat_id: str,
         on_progress: ProgressCallback | None,
     ) -> None:
+        """初始化当前对象并建立必要状态。"""
         self._runtime = runtime
         self.request_key = request_key
         self.nanobot_side_session_key = nanobot_side_session_key
@@ -65,22 +70,19 @@ class SessionStateManager:
         self._pending_permission_request: PendingPermissionRequest | None = None
 
     def is_closed(self) -> bool:
+        """关闭运行时并释放资源。"""
         return self._closed
 
     def bind_progress_router(self, progress_router: ProgressRouter) -> None:
-        """Bind the progress router so state owns its close lifecycle."""
+        """绑定进度路由器。"""
 
-        # Once router is bound to state, state owns the entire shutdown path and callers
-        # no longer need to close the router or flush pools separately.
         self._progress_router = progress_router
 
     async def emit_progress(self, *, content: str, metadata: JSONMap) -> None:
-        """Mirror structured progress to the request on_progress sink if present."""
+        """向外镜像发布进度。"""
 
         if not content or self.on_progress is None:
             return
-        # State is the source of truth for structured progress. `on_progress` is only a
-        # compatibility mirror sink, so signature adaptation is centralized here.
         callback_kwargs: dict[str, object] = {}
         if "tool_hint" in metadata:
             callback_kwargs["tool_hint"] = metadata["tool_hint"]
@@ -89,8 +91,6 @@ class SessionStateManager:
         try:
             await self.on_progress(content, **callback_kwargs)
         except TypeError:
-            # Older `on_progress` callbacks accepted fewer keyword arguments, so keep a
-            # narrow fallback only at the state exit boundary.
             try:
                 if "tool_hint" in callback_kwargs:
                     await self.on_progress(content, tool_hint=callback_kwargs["tool_hint"])
@@ -107,7 +107,7 @@ class SessionStateManager:
         *,
         progress_router: ProgressRouter,
     ) -> None:
-        """Consume ACP callback updates into request-scoped facts and progress pools."""
+        """消费会话更新并写入状态池。"""
 
         if self._closed:
             await self._runtime.push_observability(
@@ -132,8 +132,6 @@ class SessionStateManager:
         )
 
         if isinstance(update, AgentMessageChunk) and isinstance(update.content, TextContentBlock):
-            # Text must feed both the progress pool and final-text aggregation. That is
-            # exactly why state owns both progress facts and final result materialization.
             text = str(getattr(update.content, "text", "") or "")
             self.message_text_pool.accept(text)
             self.request_scope.final_text = self.message_text_pool.text.strip()
@@ -145,8 +143,6 @@ class SessionStateManager:
             update.content,
             (ImageContentBlock, ResourceContentBlock, EmbeddedResourceContentBlock),
         ):
-            # Media paths are aggregated inside request-scoped state instead of flowing
-            # back into runtime-level side structures such as old `_session_result_media`.
             media_path = self._extract_media_path(update.content)
             if media_path:
                 self.media_pool.accept(media_path)
@@ -173,7 +169,7 @@ class SessionStateManager:
 
     @staticmethod
     def _extract_media_path(block: ACPResourceBlock) -> str | None:
-        """Best-effort extraction of a usable media path from ACP resource blocks."""
+        """执行该方法定义的处理流程并返回结果。"""
 
         for attr in ("uri", "path"):
             value = getattr(block, attr, None)
@@ -194,10 +190,8 @@ class SessionStateManager:
         options: list[ACPPermissionOption],
         tool_call: ACPToolCall | None = None,
     ) -> object:
-        """Wait for an inbound permission reply owned by this request state."""
+        """处理权限请求并返回权限结果。"""
 
-        # The pending permission waiter belongs to this request state. Inbound only
-        # delivers replies and does not own the future or timeout decision.
         if self._closed:
             raise RuntimeError("permission request received after state closed")
 
@@ -239,13 +233,14 @@ class SessionStateManager:
         )
 
     def has_pending_permission(self) -> bool:
+        """执行该方法定义的处理流程并返回结果。"""
         return (
             self._pending_permission_future is not None
             and not self._pending_permission_future.done()
         )
 
     def looks_like_permission_reply(self, reply_text: str) -> bool:
-        """Return True when the reply can be mapped onto the pending permission options."""
+        """构造命令回复消息。"""
 
         request = self._pending_permission_request
         if request is None:
@@ -260,7 +255,7 @@ class SessionStateManager:
         return self._select_permission_option(request.options, normalized) is not None
 
     async def handle_permission_reply(self, *, reply_text: str) -> str:
-        """Accept an inbound permission reply and resolve the pending permission waiter."""
+        """消费权限回复并唤醒等待方。"""
 
         future = self._pending_permission_future
         request = self._pending_permission_request
@@ -292,7 +287,7 @@ class SessionStateManager:
     def _select_permission_option(
         options: list[ACPPermissionOption], reply_text: str
     ) -> str | None:
-        """Map simple user replies onto ACP permission option ids."""
+        """执行该方法定义的处理流程并返回结果。"""
 
         reply = reply_text.strip().lower()
         if not reply:
@@ -329,6 +324,7 @@ class SessionStateManager:
 
     @staticmethod
     def _render_permission_prompt(options: list[ACPPermissionOption]) -> str:
+        """执行该方法定义的处理流程并返回结果。"""
         lines = ["ACP requires permission. Reply with /permission <number>:"]
         for index, option in enumerate(options, start=1):
             kind = getattr(
@@ -339,10 +335,8 @@ class SessionStateManager:
         return "\n".join(lines)
 
     def materialize_final_outbound(self, *, partial: bool = False) -> OutboundMessage:
-        """Materialize the final outbound from request-scoped facts."""
+        """按请求聚合事实物化最终结果。"""
 
-        # State owns final OutboundMessage materialization. ProcessRuntimeManager only
-        # consumes the result instead of building final payloads itself.
         content = self.request_scope.partial_text if partial else self.request_scope.final_text
         return OutboundMessage(
             channel=self.channel,
@@ -353,12 +347,10 @@ class SessionStateManager:
         )
 
     async def close(self) -> None:
-        """Close the request state exactly once and flush remaining progress."""
+        """关闭运行时并释放资源。"""
 
         if self._closed:
             return
-        # Close is the hard boundary for one request. After it flips, late writes are
-        # only observable events and can no longer mutate final aggregation or progress.
         self._closed = True
         if self._progress_router is not None:
             await self._progress_router.close()

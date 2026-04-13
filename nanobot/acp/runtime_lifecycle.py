@@ -1,4 +1,4 @@
-"""ACP runtime connection lifecycle helpers."""
+"""运行时主入口与请求等待主链。"""
 
 from __future__ import annotations
 
@@ -18,10 +18,8 @@ if TYPE_CHECKING:
 
 
 async def _clear_connection_handles_without_lock(runtime: ACPRuntime) -> None:
-    """Clear ACP connection handles while already inside the connection lock."""
+    """执行该方法定义的处理流程并返回结果。"""
 
-    # This helper is only called while already holding the connection lock so failed
-    # bootstrap cleanup does not re-enter the same lock and deadlock.
     old_cm = runtime._acp_client_connection_cm
     if old_cm is not None:
         try:
@@ -38,15 +36,13 @@ async def _clear_connection_handles_without_lock(runtime: ACPRuntime) -> None:
 
 
 async def ensure_connection(runtime: ACPRuntime) -> None:
-    """Establish ACP client connection and bootstrap runtime-owned managers."""
+    """确保协议连接处于可用状态。"""
 
     if runtime._acp_client_conn is not None:
         return
     async with runtime._acp_connection_lock:
         if runtime._acp_client_conn is not None:
             return
-        # The callback client is the single bridge between runtime and the ACP SDK, so
-        # every session_update and permission callback re-enters the runtime owner path.
         runtime.acp_callback_client = _NanobotACPClient(runtime)
         env = {**os.environ, **runtime.acp_config.env}
         cwd = (
@@ -65,8 +61,6 @@ async def ensure_connection(runtime: ACPRuntime) -> None:
         try:
             from acp.schema import ClientCapabilities, Implementation
 
-            # Enter and initialize stay on one protected path so runtime becomes ready
-            # only after the entire connection bootstrap succeeds.
             connection_cm = runtime._acp_client_connection_cm
             if connection_cm is None:
                 raise RuntimeError("ACP connection bootstrap did not create a context manager")
@@ -90,8 +84,6 @@ async def ensure_connection(runtime: ACPRuntime) -> None:
             )
             await runtime.session_runtime_manager.bootstrap_ready_sessions()
         except Exception:
-            # Bootstrap failure must roll back the whole runtime-owned generation. Leaving
-            # half-open handles or half-complete wait entries would poison later requests.
             await _clear_connection_handles_without_lock(runtime)
             await runtime.process_runtime_manager.rebuild(
                 error=RuntimeError("ACP connection bootstrap failed")
@@ -103,11 +95,9 @@ async def ensure_connection(runtime: ACPRuntime) -> None:
 
 
 async def reset_connection(runtime: ACPRuntime) -> None:
-    """Reset ACP runtime-owned connection state and runtime-owned managers."""
+    """重置协议连接并清理代际状态。"""
 
     async with runtime._acp_connection_lock:
-        # Runtime rebuild invalidates the entire generation, so reset clears the
-        # connection, fails all wait entries, and rebuilds process/session runtime state.
         await _clear_connection_handles_without_lock(runtime)
         await runtime.process_runtime_manager.rebuild(error=RuntimeError("ACP runtime rebuilt"))
         runtime.session_runtime_manager.rebuild()
@@ -122,10 +112,8 @@ async def reset_connection(runtime: ACPRuntime) -> None:
 
 
 async def close_runtime(runtime: ACPRuntime) -> None:
-    """Close runtime-owned background loops and ACP connection resources."""
+    """启动主循环并持续消费入站消息。"""
 
     runtime._running = False
-    # Close resets first and stops the observability consumer second so runtime,
-    # process, and state can still enqueue their final reset events before shutdown.
     await reset_connection(runtime)
     await runtime.observability_manager.stop()

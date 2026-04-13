@@ -1,4 +1,4 @@
-"""Persistent storage helpers for session binding truth."""
+"""会话绑定真相与运行态映射层。"""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from nanobot.acp.sessionmap.models import SessionMapBindingEntry
 
 
 def read_sessionmap_payload(map_file: Path) -> JSONMap:
-    """Read the on-disk sessionmap payload with strict schema validation."""
+    """执行该方法定义的处理流程并返回结果。"""
 
     if not map_file.exists():
         return {"version": 2, "mappings": []}
@@ -31,7 +31,7 @@ def write_sessionmap_payload(
     current_cwd: str,
     entries: dict[str, SessionMapBindingEntry],
 ) -> None:
-    """Persist one cwd-scoped session binding view while preserving others."""
+    """执行该方法定义的处理流程并返回结果。"""
 
     payload = (
         read_sessionmap_payload(map_file) if map_file.exists() else {"version": 2, "mappings": []}

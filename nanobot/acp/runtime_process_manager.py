@@ -1,4 +1,4 @@
-"""Process runtime manager for ACP request queueing and active request lifecycle."""
+"""运行时主入口与请求等待主链。"""
 
 from __future__ import annotations
 
@@ -22,17 +22,17 @@ if TYPE_CHECKING:
 
 
 class ProcessRuntimeManager:
-    """Owns per-session serial queues and active request indexes."""
+    """负责运行时主链路编排与资源生命周期。"""
 
     def __init__(self, *, runtime: ACPRuntime) -> None:
+        """初始化当前对象并建立必要状态。"""
         self._runtime = runtime
         self.queue_by_nanobot_side_session_key: dict[str, SessionQueueState] = {}
         self.active_by_request_key: dict[str, ActiveProcessEntry] = {}
         self.active_by_acp_side_session_id: dict[str, ActiveProcessEntry] = {}
 
     async def enqueue(self, process_request: ProcessRequest) -> None:
-        # ProcessRuntimeManager owns the real serial queue. Inbound only assembles
-        # ProcessRequest objects and does not own the active/queue state machine.
+        """将请求入队并触发会话串行处理。"""
         queue_state = self.queue_by_nanobot_side_session_key.setdefault(
             process_request.nanobot_side_session_key,
             SessionQueueState(nanobot_side_session_key=process_request.nanobot_side_session_key),
@@ -52,11 +52,13 @@ class ProcessRuntimeManager:
     def get_active_by_acp_side_session_id(
         self, acp_side_session_id: str
     ) -> ActiveProcessEntry | None:
+        """按协议会话标识查询活跃请求。"""
         return self.active_by_acp_side_session_id.get(acp_side_session_id)
 
     def find_request_waiting_permission(
         self, *, nanobot_side_session_key: str
     ) -> ActiveProcessEntry | None:
+        """查找正在等待权限回复的请求。"""
         queue_state = self.queue_by_nanobot_side_session_key.get(nanobot_side_session_key)
         if queue_state is None:
             return None
@@ -70,10 +72,8 @@ class ProcessRuntimeManager:
     async def stop_session(
         self, *, nanobot_side_session_key: str, acp_side_session_id: str | None
     ) -> tuple[bool, int]:
-        """Drop queued requests and try to stop the active ACP session if present."""
+        """停止指定会话的活跃与排队请求。"""
 
-        # `/stop` semantics are "drop queued immediately, try to cancel active". Clear
-        # queued requests first and complete them so direct/bus callers never wait forever.
         active_cancel_requested = False
         dropped_queued_count = 0
         queue_state = self.queue_by_nanobot_side_session_key.get(nanobot_side_session_key)
@@ -102,8 +102,7 @@ class ProcessRuntimeManager:
         return active_cancel_requested, dropped_queued_count
 
     async def rebuild(self, *, error: Exception) -> None:
-        # Runtime rebuild invalidates every active and queued request owned here. All
-        # waiters must terminate through unified completion instead of silently vanishing.
+        """重建当前运行态并清理旧代资源。"""
         for active_entry in list(self.active_by_request_key.values()):
             try:
                 await active_entry.close()
@@ -123,20 +122,18 @@ class ProcessRuntimeManager:
         self.active_by_acp_side_session_id.clear()
 
     async def _drain_session_queue(self, queue_state: SessionQueueState) -> None:
+        """按会话串行消费请求队列。"""
         while queue_state.queued_requests:
-            # A single nanobot_side_session_key always runs serially. This loop is the
-            # only place allowed to advance the per-session process queue.
             process_request = queue_state.queued_requests.popleft()
             await self._activate_and_run(process_request)
         queue_state.draining_task = None
 
     async def _activate_and_run(self, process_request: ProcessRequest) -> None:
+        """启动主循环并持续消费入站消息。"""
         active_entry = None
         outbound: OutboundMessage | None = None
         error: Exception | None = None
         try:
-            # Ensure the ready session before real execution, then create the request-
-            # scoped state/router pair and attach them to the active entry.
             preferred_model = process_request.metadata.get("_acp_session_model")
             preferred_agent = process_request.metadata.get("_acp_session_agent")
             acp_side_session_id = await self._runtime.session_runtime_manager.ensure_ready_session(
@@ -191,8 +188,6 @@ class ProcessRuntimeManager:
             error = exc
         finally:
             if active_entry is not None:
-                # Close the request-owned resources before runtime completion so
-                # completion itself only carries the minimal request_key + outbound/error.
                 active_entry.status = RequestStatus.FINISHING
                 try:
                     await active_entry.close()

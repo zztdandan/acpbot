@@ -1,4 +1,4 @@
-"""Audit sink helpers for ACP observability events."""
+"""结构化观测事件记录层。"""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from nanobot.acp.observability.queue import ObservabilityEvent
 
 
 def write_audit_event(event: ObservabilityEvent) -> None:
-    """Emit a concise structured audit line for ACP observability."""
+    """执行该方法定义的处理流程并返回结果。"""
 
     logger.debug(
         "ACP audit scope={} event={} request_key={} nanobot_side_session_key={} acp_side_session_id={} payload={}",

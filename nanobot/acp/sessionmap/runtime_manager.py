@@ -1,4 +1,4 @@
-"""Runtime-ready session manager for ACP runtime lifecycle."""
+"""运行时主入口与请求等待主链。"""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 
 class SessionRuntimeManager:
-    """Owns runtime-lifetime ready session entries and dual indexes."""
+    """负责运行时主链路编排与资源生命周期。"""
 
     def __init__(
         self,
@@ -31,6 +31,7 @@ class SessionRuntimeManager:
         runtime: ACPRuntime,
         binding_manager: SessionMapBindingManager,
     ) -> None:
+        """初始化当前对象并建立必要状态。"""
         self._runtime = runtime
         self._binding_manager = binding_manager
         self._lock = asyncio.Lock()
@@ -41,13 +42,15 @@ class SessionRuntimeManager:
         self,
         nanobot_side_session_key: str,
     ) -> SessionRuntimeEntry | None:
+        """执行该方法定义的处理流程并返回结果。"""
         return self._by_nanobot_side_session_key.get(nanobot_side_session_key)
 
     def get_by_acp_side_session_id(self, acp_side_session_id: str) -> SessionRuntimeEntry | None:
+        """执行该方法定义的处理流程并返回结果。"""
         return self._by_acp_side_session_id.get(acp_side_session_id)
 
     def ensure_session_capabilities(self, acp_side_session_id: str) -> _SessionCapabilities | None:
-        """Return the runtime-owned capability cache for one ready ACP session."""
+        """执行该方法定义的处理流程并返回结果。"""
 
         entry = self._by_acp_side_session_id.get(acp_side_session_id)
         return entry.capabilities if entry is not None else None
@@ -58,7 +61,7 @@ class SessionRuntimeManager:
         acp_side_session_id: str,
         payload: ACPSessionPayload,
     ) -> None:
-        """Mirror ACP payload capability facts into the runtime-owned session cache."""
+        """执行该方法定义的处理流程并返回结果。"""
 
         entry = self._by_acp_side_session_id.get(acp_side_session_id)
         if entry is None:
@@ -66,38 +69,38 @@ class SessionRuntimeManager:
         _update_caps_from_session_payload(entry.capabilities, payload)
 
     def drop_session_capabilities(self, *, acp_side_session_id: str) -> None:
-        """Drop one session capability cache alongside binding/runtime invalidation."""
+        """执行该方法定义的处理流程并返回结果。"""
 
         entry = self._by_acp_side_session_id.get(acp_side_session_id)
         if entry is not None:
             entry.capabilities = _SessionCapabilities()
 
     def set_current_model(self, *, acp_side_session_id: str, model_id: str) -> None:
-        """Keep the runtime capability mirror aligned with the latest model selection."""
+        """执行该方法定义的处理流程并返回结果。"""
 
         caps = self.ensure_session_capabilities(acp_side_session_id)
         if caps is not None:
             caps.current_model = model_id
 
     def set_current_agent(self, *, acp_side_session_id: str, agent_id: str) -> None:
-        """Keep the runtime capability mirror aligned with the latest agent selection."""
+        """执行该方法定义的处理流程并返回结果。"""
 
         caps = self.ensure_session_capabilities(acp_side_session_id)
         if caps is not None:
             caps.current_agent = agent_id
 
     def build_prompt_metadata(self, *, acp_side_session_id: str) -> JSONMap:
-        """Expose execution metadata without letting outer modules read session caps directly."""
+        """执行该方法定义的处理流程并返回结果。"""
 
         return _build_prompt_metadata(self._caps_for(acp_side_session_id=acp_side_session_id))
 
     def render_models_command(self, *, acp_side_session_id: str) -> str:
-        """Render the model list through the runtime-owned capability mirror."""
+        """执行该方法定义的处理流程并返回结果。"""
 
         return _render_models_command(self._caps_for(acp_side_session_id=acp_side_session_id))
 
     def render_agents_command(self, *, acp_side_session_id: str) -> str:
-        """Render the agent list through the runtime-owned capability mirror."""
+        """执行该方法定义的处理流程并返回结果。"""
 
         return _render_agents_command(self._caps_for(acp_side_session_id=acp_side_session_id))
 
@@ -108,14 +111,12 @@ class SessionRuntimeManager:
         preferred_model: str | None = None,
         preferred_agent: str | None = None,
     ) -> str:
-        """Ensure there is a runtime-ready ACP session for the nanobot-side session."""
+        """确保当前会话存在可用协议会话。"""
 
         async with self._lock:
             await self._binding_manager.load_persistent_truth()
             existing = self._by_nanobot_side_session_key.get(nanobot_side_session_key)
             if existing is not None and existing.ready:
-                # Reusing a ready entry must not recreate the session. Only apply this
-                # request's preferred selection delta so runtime reuse semantics stay intact.
                 await self._apply_runtime_selection(
                     acp_side_session_id=existing.acp_side_session_id,
                     nanobot_side_session_key=nanobot_side_session_key,
@@ -131,8 +132,6 @@ class SessionRuntimeManager:
 
             acp_side_session_id = self._binding_manager.resolve_session_id(nanobot_side_session_key)
             if acp_side_session_id:
-                # When binding truth exists, try to activate the historical ACP session
-                # first and fall back to new_session only if activation fails.
                 activated, payload = await self._binding_manager.activate_session(
                     nanobot_side_session_key,
                     acp_side_session_id,
@@ -161,11 +160,7 @@ class SessionRuntimeManager:
                 if self._runtime.acp_config.cwd
                 else self._runtime.workspace
             )
-            # ACP no longer injects nanobot MCP server config into the remote side. New
-            # sessions are created from cwd alone and tool capabilities stay remote-owned.
             response = await conn.new_session(cwd=str(cwd.resolve()))
-            # As soon as new_session succeeds, mirror the current selection into the ACP
-            # session, binding truth, and runtime entry so reconnects do not lose it.
             acp_side_session_id = response.session_id
             bound_model, bound_agent = self._binding_manager.get_bound_selection(
                 nanobot_side_session_key
@@ -213,23 +208,19 @@ class SessionRuntimeManager:
             return acp_side_session_id
 
     def rebuild(self) -> None:
-        """Drop all runtime-owned ready session entries during runtime rebuild."""
+        """重建当前运行态并清理旧代资源。"""
 
-        # Rebuild drops only ready sessions from the current runtime generation. Persistent
-        # binding truth remains in the binding manager and is re-applied on the next ensure.
         self._by_nanobot_side_session_key.clear()
         self._by_acp_side_session_id.clear()
 
     def drop_ready_session(self, *, nanobot_side_session_key: str) -> None:
-        """Drop one ready session entry so the next request must re-ensure it."""
+        """丢弃当前会话就绪条目。"""
 
         self._drop_runtime_entry(nanobot_side_session_key=nanobot_side_session_key)
 
     async def bootstrap_ready_sessions(self) -> list[str]:
-        """Load binding truth lazily; ready sessions are ensured on demand."""
+        """执行该方法定义的处理流程并返回结果。"""
 
-        # Deliberately avoid bulk-activating historical sessions here. Only load binding
-        # truth into memory so ready sessions stay lazily established.
         await self._binding_manager.load_persistent_truth()
         return []
 
@@ -240,7 +231,7 @@ class SessionRuntimeManager:
         bound_model: str | None = None,
         bound_agent: str | None = None,
     ) -> None:
-        """Keep the mirrored ready-entry selection in sync with command writes."""
+        """启动主循环并持续消费入站消息。"""
 
         entry = self._by_nanobot_side_session_key.get(nanobot_side_session_key)
         if entry is None:
@@ -258,10 +249,8 @@ class SessionRuntimeManager:
         preferred_model: str | None,
         preferred_agent: str | None,
     ) -> None:
-        """Apply per-request preferred selection onto an existing ready session."""
+        """启动主循环并持续消费入站消息。"""
 
-        # Preferred selection belongs to "how this request should run", but once applied
-        # it must refresh binding truth so reconnect/replay keep the latest choice.
         conn = self._runtime._acp_client_conn
         if conn is None:
             return
@@ -292,6 +281,7 @@ class SessionRuntimeManager:
         nanobot_side_session_key: str,
         acp_side_session_id: str,
     ) -> str:
+        """启动主循环并持续消费入站消息。"""
         bound_model, bound_agent = self._binding_manager.get_bound_selection(
             nanobot_side_session_key
         )
@@ -307,12 +297,13 @@ class SessionRuntimeManager:
         return acp_side_session_id
 
     def _drop_runtime_entry(self, *, nanobot_side_session_key: str) -> None:
+        """启动主循环并持续消费入站消息。"""
         entry = self._by_nanobot_side_session_key.pop(nanobot_side_session_key, None)
         if entry is not None:
             self._by_acp_side_session_id.pop(entry.acp_side_session_id, None)
 
     def _caps_for(self, *, acp_side_session_id: str) -> _SessionCapabilities | None:
-        """Return capability cache for one active session id if present."""
+        """执行该方法定义的处理流程并返回结果。"""
 
         entry = self._by_acp_side_session_id.get(acp_side_session_id)
         return entry.capabilities if entry is not None else None

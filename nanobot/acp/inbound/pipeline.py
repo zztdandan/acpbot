@@ -1,4 +1,4 @@
-"""Fixed inbound pipeline steps for ACP runtime."""
+"""入站归一化与步骤编排层。"""
 
 from __future__ import annotations
 
@@ -15,9 +15,9 @@ InboundStep = Callable[[InboundContext], Awaitable[None]]
 
 
 def build_normalize_step(runtime: ACPRuntime) -> InboundStep:
+    """执行该方法定义的处理流程并返回结果。"""
     async def _normalize(ctx: InboundContext) -> None:
-        # Normalize only the inbound shape. It must not absorb command, permission,
-        # or state-creation owner logic.
+        """执行该方法定义的处理流程并返回结果。"""
         ctx.content = str(ctx.content or "")
         ctx.media = list(ctx.media or [])
         ctx.metadata = dict(ctx.metadata or {})
@@ -27,9 +27,9 @@ def build_normalize_step(runtime: ACPRuntime) -> InboundStep:
 
 
 def build_permission_inbound_step(runtime: ACPRuntime) -> InboundStep:
+    """执行该方法定义的处理流程并返回结果。"""
     async def _permission_inbound(ctx: InboundContext) -> None:
-        # Permission inbound only detects and forwards likely replies. The pending
-        # waiter itself remains owned by the target request state.
+        """执行该方法定义的处理流程并返回结果。"""
         active_entry = runtime.process_runtime_manager.find_request_waiting_permission(
             nanobot_side_session_key=ctx.nanobot_side_session_key,
         )
@@ -48,11 +48,11 @@ def build_permission_inbound_step(runtime: ACPRuntime) -> InboundStep:
 
 
 def build_command_router_step(command_router: CommandRouter) -> InboundStep:
+    """执行该方法定义的处理流程并返回结果。"""
     async def _command_router(ctx: InboundContext) -> None:
+        """执行该方法定义的处理流程并返回结果。"""
         if ctx.direct_response is not None:
             return
-        # Slash commands must be intercepted before real prompt execution. Unknown
-        # commands also return directly so they are never forwarded to ACP prompt.
         response = await command_router.maybe_handle(ctx)
         if response is not None:
             ctx.direct_response = response
@@ -61,9 +61,9 @@ def build_command_router_step(command_router: CommandRouter) -> InboundStep:
 
 
 def build_media_prepare_step(runtime: ACPRuntime) -> InboundStep:
+    """执行该方法定义的处理流程并返回结果。"""
     async def _media_prepare(ctx: InboundContext) -> None:
-        # Inbound prepares media artifacts only. Final prompt blocks remain the
-        # responsibility of the execution-stage helper.
+        """执行该方法定义的处理流程并返回结果。"""
         media_artifacts = build_media_artifacts(
             workspace=runtime.workspace,
             media=ctx.media,
@@ -83,11 +83,11 @@ def build_media_prepare_step(runtime: ACPRuntime) -> InboundStep:
 
 
 def build_process_request_step(runtime: ACPRuntime) -> InboundStep:
+    """执行该方法定义的处理流程并返回结果。"""
     async def _build_process_request(ctx: InboundContext) -> None:
+        """执行该方法定义的处理流程并返回结果。"""
         if ctx.direct_response is not None:
             return
-        # ProcessRequest keeps only facts that real execution must know. The whole
-        # inbound context does not cross into the execution layer unchanged.
         ctx.process_request = ProcessRequest(
             request_key=ctx.request_key,
             nanobot_side_session_key=ctx.nanobot_side_session_key,
