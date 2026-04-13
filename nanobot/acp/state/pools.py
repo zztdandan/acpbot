@@ -1,211 +1,136 @@
+"""Request-scoped pools used by SessionStateManager and ProgressRouter."""
+
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
-from nanobot.acp.state.models import ACPBucketType, ACPOutboundKind, FlushResult
+from nanobot.acp.state.models import ACPOutboundKind, FlushResult
 
 
 @dataclass(slots=True)
 class MessageTextPool:
-    pool_id: str
-    session_id: str
-    pool_type: ACPBucketType = ACPBucketType.TEXT
-    route_key: str = ""
-    parts: list[str] = field(default_factory=list)
-    idle_task: asyncio.Task[Any] | None = None
-    _terminal: bool = False
+    """Accumulates agent text both for progress and final text aggregation."""
 
-    async def accept(self, item: Any) -> None:
-        if item is not None:
-            self.parts.append(str(item))
+    text: str = ""
+    _last_flushed_text: str = ""
 
-    async def flush(self, reason: str) -> FlushResult:
-        text = "".join(self.parts)
-        self.parts.clear()
-        return FlushResult(
-            outbound_kind=ACPOutboundKind.TEXT,
-            payload=text,
-            metadata={"reason": reason},
-        )
+    def accept(self, payload: Any) -> None:
+        # 中文注释：文本 pool 要兼容 ACP 可能回放“全量文本”或“增量文本”两种形态，
+        # 因此这里做去重拼接，避免 final/progress 都出现重复内容。
+        chunk = str(payload or "")
+        if not chunk:
+            return
+        if not self.text:
+            self.text = chunk
+            return
+        if chunk.startswith(self.text):
+            self.text = chunk
+            return
+        if self.text.endswith(chunk):
+            return
+        self.text += chunk
 
-    async def close(self) -> None:
-        if self.idle_task is not None:
-            self.idle_task.cancel()
-            self.idle_task = None
-        self._terminal = True
+    def flush(self) -> FlushResult | None:
+        # 中文注释：flush 只发布“自上次 flush 之后真正变化过”的内容，
+        # 这样 state router 才能稳定地把它镜像成结构化 progress。
+        if not self.text or self.text == self._last_flushed_text:
+            return None
+        self._last_flushed_text = self.text
+        return FlushResult(kind=ACPOutboundKind.TEXT, content=self.text)
+
+    def close(self) -> FlushResult | None:
+        return self.flush()
 
     def is_terminal(self) -> bool:
-        return self._terminal
+        return False
 
 
 @dataclass(slots=True)
 class MediaPool:
-    pool_id: str
-    session_id: str
-    pool_type: ACPBucketType = ACPBucketType.MEDIA
-    route_key: str = ""
-    latest_payload: dict[str, Any] | None = None
-    idle_task: asyncio.Task[Any] | None = None
-    _terminal: bool = False
+    """Accumulates media paths while preserving order and uniqueness."""
 
-    async def accept(self, item: Any) -> None:
-        self.latest_payload = dict(item or {})
+    media_paths: list[str] = field(default_factory=list)
+    _last_flushed_count: int = 0
 
-    async def flush(self, reason: str) -> FlushResult:
-        payload = dict(self.latest_payload or {})
-        self.latest_payload = None
-        return FlushResult(
-            outbound_kind=ACPOutboundKind.MEDIA,
-            payload=payload,
-            metadata={"reason": reason},
-        )
+    def accept(self, payload: Any) -> None:
+        path = str(payload or "").strip()
+        if path and path not in self.media_paths:
+            self.media_paths.append(path)
 
-    async def close(self) -> None:
-        if self.idle_task is not None:
-            self.idle_task.cancel()
-            self.idle_task = None
-        self._terminal = True
+    def flush(self) -> FlushResult | None:
+        if len(self.media_paths) <= self._last_flushed_count:
+            return None
+        # 中文注释：media pool 以“新增资源列表”为 flush 单位，
+        # 避免每次 progress 都重复回放全部历史附件。
+        flushed = self.media_paths[self._last_flushed_count :]
+        self._last_flushed_count = len(self.media_paths)
+        return FlushResult(kind=ACPOutboundKind.MEDIA, media=list(flushed))
+
+    def close(self) -> FlushResult | None:
+        return self.flush()
 
     def is_terminal(self) -> bool:
-        return self._terminal
+        return False
 
 
 @dataclass(slots=True)
 class ToolPool:
-    pool_id: str
-    session_id: str
-    pool_type: ACPBucketType = ACPBucketType.TOOL
-    route_key: str = ""
-    latest: dict[str, Any] | None = None
-    history: list[dict[str, Any]] = field(default_factory=list)
-    history_dropped: int = 0
-    idle_task: asyncio.Task[Any] | None = None
-    _terminal: bool = False
+    """Tracks the latest tool lifecycle message for progress mirroring."""
 
-    async def accept(self, item: Any) -> None:
-        payload = dict(item or {})
-        self.latest = payload
-        self.history.append(payload)
+    latest_message: str = ""
+    _dirty: bool = False
 
-    async def flush(self, reason: str) -> FlushResult:
+    def accept(self, payload: Any) -> None:
+        message = str(payload or "").strip()
+        if not message:
+            return
+        self.latest_message = message
+        self._dirty = True
+
+    def flush(self) -> FlushResult | None:
+        if not self._dirty or not self.latest_message:
+            return None
+        # 中文注释：tool pool 在 flush 时补齐 tool_hint 元数据，
+        # 让 state 统一出口仍能保留旧链路需要的 tool hint 语义。
+        self._dirty = False
         return FlushResult(
-            outbound_kind=ACPOutboundKind.TOOL,
-            payload={
-                "latest": dict(self.latest or {}),
-                "history": list(self.history),
-                "history_dropped": self.history_dropped,
-            },
-            metadata={"reason": reason},
+            kind=ACPOutboundKind.TOOL,
+            content=self.latest_message,
+            metadata={"tool_hint": True, "_tool_hint": True},
         )
 
-    async def close(self) -> None:
-        if self.idle_task is not None:
-            self.idle_task.cancel()
-            self.idle_task = None
-        self._terminal = True
+    def close(self) -> FlushResult | None:
+        return self.flush()
 
     def is_terminal(self) -> bool:
-        return self._terminal
-
-
-@dataclass(slots=True)
-class ThoughtPool:
-    pool_id: str
-    session_id: str
-    pool_type: ACPBucketType = ACPBucketType.THOUGHT
-    items: list[Any] = field(default_factory=list)
-    _terminal: bool = False
-
-    async def accept(self, item: Any) -> None:
-        self.items.append(item)
-
-    async def flush(self, reason: str) -> FlushResult:
-        return FlushResult(
-            outbound_kind=ACPOutboundKind.THOUGHT,
-            payload=list(self.items),
-            metadata={"reason": reason},
-        )
-
-    async def close(self) -> None:
-        self._terminal = True
-
-    def is_terminal(self) -> bool:
-        return self._terminal
-
-
-@dataclass(slots=True)
-class PlanPool:
-    pool_id: str
-    session_id: str
-    pool_type: ACPBucketType = ACPBucketType.PLAN
-    items: list[Any] = field(default_factory=list)
-    _terminal: bool = False
-
-    async def accept(self, item: Any) -> None:
-        self.items.append(item)
-
-    async def flush(self, reason: str) -> FlushResult:
-        return FlushResult(
-            outbound_kind=ACPOutboundKind.PLAN,
-            payload=list(self.items),
-            metadata={"reason": reason},
-        )
-
-    async def close(self) -> None:
-        self._terminal = True
-
-    def is_terminal(self) -> bool:
-        return self._terminal
+        return False
 
 
 @dataclass(slots=True)
 class PermissionPool:
-    pool_id: str
-    session_id: str
-    pool_type: ACPBucketType = ACPBucketType.PERMISSION
-    items: list[Any] = field(default_factory=list)
-    _terminal: bool = False
+    """Tracks the latest permission prompt mirrored to the outside world."""
 
-    async def accept(self, item: Any) -> None:
-        self.items.append(item)
+    prompt: str = ""
+    _dirty: bool = False
 
-    async def flush(self, reason: str) -> FlushResult:
-        return FlushResult(
-            outbound_kind=ACPOutboundKind.PERMISSION,
-            payload=list(self.items),
-            metadata={"reason": reason},
-        )
+    def accept(self, payload: Any) -> None:
+        prompt = str(payload or "").strip()
+        if not prompt:
+            return
+        self.prompt = prompt
+        self._dirty = True
 
-    async def close(self) -> None:
-        self._terminal = True
+    def flush(self) -> FlushResult | None:
+        if not self._dirty or not self.prompt:
+            return None
+        # 中文注释：permission prompt 也走统一 FlushResult，
+        # 这样 permission progress 与 text/tool progress 共用同一条 state 出口。
+        self._dirty = False
+        return FlushResult(kind=ACPOutboundKind.PERMISSION, content=self.prompt)
 
-    def is_terminal(self) -> bool:
-        return self._terminal
-
-
-@dataclass(slots=True)
-class ConsumeOnlyPool:
-    pool_id: str
-    session_id: str
-    pool_type: ACPBucketType = ACPBucketType.NONE
-    accepted_items: list[Any] = field(default_factory=list)
-    _terminal: bool = False
-
-    async def accept(self, item: Any) -> None:
-        self.accepted_items.append(item)
-        self._terminal = True
-
-    async def flush(self, reason: str) -> FlushResult:
-        return FlushResult(
-            outbound_kind=ACPOutboundKind.NONE,
-            payload=None,
-            metadata={"reason": reason},
-        )
-
-    async def close(self) -> None:
-        self._terminal = True
+    def close(self) -> FlushResult | None:
+        return self.flush()
 
     def is_terminal(self) -> bool:
-        return self._terminal
+        return False

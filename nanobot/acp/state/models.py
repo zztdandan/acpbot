@@ -1,3 +1,9 @@
+"""Core ACP state models.
+
+The state package owns one request-scoped state manager at a time, so the models
+here describe per-request facts rather than runtime-level global maps.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -6,75 +12,62 @@ from typing import Any, Protocol
 
 
 class ACPUpdateType(str, Enum):
-    """Normalized ACP update types for the new handler pipeline."""
+    """High-level update types recognized by the state router."""
 
-    USER_MESSAGE_CHUNK = "user_message_chunk"
-    AGENT_MESSAGE_CHUNK = "agent_message_chunk"
-    AGENT_THOUGHT_CHUNK = "agent_thought_chunk"
-    TOOL_CALL_START = "tool_call_start"
-    TOOL_CALL_PROGRESS = "tool_call_progress"
-    TOOL_CALL_UPDATE = "tool_call_update"
-    AGENT_PLAN_UPDATE = "agent_plan_update"
-    AVAILABLE_COMMANDS_UPDATE = "available_commands_update"
-    CURRENT_MODE_UPDATE = "current_mode_update"
-    CONFIG_OPTION_UPDATE = "config_option_update"
-    SESSION_INFO_UPDATE = "session_info_update"
-    USAGE_UPDATE = "usage_update"
-    UNKNOWN = "unknown"
+    AGENT_MESSAGE_TEXT = "agent_message_text"
+    AGENT_MESSAGE_MEDIA = "agent_message_media"
+    TOOL_START = "tool_start"
+    TOOL_PROGRESS = "tool_progress"
+    PERMISSION_REQUEST = "permission_request"
+    OTHER = "other"
 
 
 class ACPBucketType(str, Enum):
-    """Pool categories owned by the session state manager."""
+    """Bucket types used for request-scoped pool indexing."""
 
-    NONE = "none"
-    TEXT = "text"
+    MESSAGE_TEXT = "message_text"
     MEDIA = "media"
     TOOL = "tool"
-    THOUGHT = "thought"
-    PLAN = "plan"
     PERMISSION = "permission"
+    OTHER = "other"
 
 
 class ACPOutboundKind(str, Enum):
-    """Outbound payload categories emitted after pool flush."""
+    """Kinds of outbound fragments that can be mirrored as progress."""
 
-    NONE = "none"
     TEXT = "text"
     MEDIA = "media"
     TOOL = "tool"
-    THOUGHT = "thought"
-    PLAN = "plan"
     PERMISSION = "permission"
 
 
 @dataclass(slots=True)
 class FlushResult:
-    """Minimal flush payload contract shared by runtime pools."""
+    """Progress flush payload produced by a router/pool pass."""
 
-    outbound_kind: ACPOutboundKind
-    payload: Any | None = None
+    kind: ACPOutboundKind
+    content: str = ""
+    media: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
 class RequestScopeState:
-    """Request-scope aggregate placeholders used by the future manager."""
+    """Request-scoped facts later materialized into the final outbound."""
 
     final_text: str = ""
     media_paths: list[str] = field(default_factory=list)
+    final_metadata: dict[str, Any] = field(default_factory=dict)
+    partial_text: str = ""
 
 
 class ACPPool(Protocol):
-    """Lifecycle contract shared by concrete ACP pools."""
+    """Shared pool contract used by state handlers and the router."""
 
-    pool_id: str
-    pool_type: ACPBucketType
-    session_id: str
+    def accept(self, payload: Any) -> None: ...
 
-    async def accept(self, item: Any) -> None: ...
+    def flush(self) -> FlushResult | None: ...
 
-    async def flush(self, reason: str) -> FlushResult: ...
-
-    async def close(self) -> None: ...
+    def close(self) -> FlushResult | None: ...
 
     def is_terminal(self) -> bool: ...
