@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import Config
@@ -104,7 +104,6 @@ def create_dispatch_runtime(
             bus=bus,
             workspace=config.workspace_path,
             acp_config=config.dispatch.acp,
-            mcp_servers=config.tools.mcp_servers,
             channels_config=config.channels,
         )
 
