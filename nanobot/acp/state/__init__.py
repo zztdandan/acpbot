@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from nanobot.acp.sessionmap.models import _SessionCapabilities
+from nanobot.acp.sessionmap.internal.session_caps import _SessionCapabilities
 from nanobot.acp.state.manager import SessionStateManager
 from nanobot.acp.state.models import (
     ACPBucketType,

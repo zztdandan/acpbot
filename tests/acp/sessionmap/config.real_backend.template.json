@@ -1,0 +1,30 @@
+{
+  "agents": {
+    "defaults": {
+      "workspace": "/home/base/repo/harness/nanobot-refactor"
+    }
+  },
+  "dispatch": {
+    "backend": "acp",
+    "acp": {
+      "command": "opencode",
+      "args": [
+        "acp",
+        "--print-logs",
+        "--log-level",
+        "WARN"
+      ],
+      "cwd": "/home/base/repo/harness/nanobot-refactor",
+      "protocolVersion": 1,
+      "permissionsPolicy": "trusted",
+      "startupTimeoutSeconds": 30,
+      "defaultModel": "RCode_OpenAI/gpt-5.4",
+      "defaultMode": "build"
+    }
+  },
+  "channels": {
+    "sendProgress": false,
+    "sendToolHints": false,
+    "sendFinal": false
+  }
+}

@@ -82,10 +82,11 @@ class CommandRouter:
                 model_id=arg,
                 session_id=acp_side_session_id,
             )
-            self._runtime.session_runtime_manager.set_current_model(
-                acp_side_session_id=acp_side_session_id,
-                model_id=arg,
+            caps = self._runtime.session_runtime_manager.get_session_capabilities(
+                acp_side_session_id
             )
+            if caps is not None:
+                caps.remember_current_model(arg)
             self._runtime.sessionmap_binding_manager.update_bound_model(
                 ctx.nanobot_side_session_key, arg
             )
@@ -107,10 +108,11 @@ class CommandRouter:
                 mode_id=arg,
                 session_id=acp_side_session_id,
             )
-            self._runtime.session_runtime_manager.set_current_agent(
-                acp_side_session_id=acp_side_session_id,
-                agent_id=arg,
+            caps = self._runtime.session_runtime_manager.get_session_capabilities(
+                acp_side_session_id
             )
+            if caps is not None:
+                caps.remember_current_agent(arg)
             self._runtime.sessionmap_binding_manager.update_bound_agent(
                 ctx.nanobot_side_session_key, arg
             )

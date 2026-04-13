@@ -1,0 +1,56 @@
+{
+  "version": 2,
+  "mappings": [
+    {
+      "cwd": "/home/base/repo/harness/nanobot-refactor",
+      "nanobotSideSessionKey": "nanobot-sessionmap-target",
+      "acpSideSessionId": "ses_279d9764affemAyT25zOD33zuU",
+      "boundModel": "RCode_OpenAI/gpt-5.4",
+      "boundAgent": "build",
+      "updatedAt": "2026-04-13T09:01:00+08:00",
+      "revision": 1
+    },
+    {
+      "cwd": "/home/base/repo/harness/nanobot-refactor",
+      "nanobotSideSessionKey": "nanobot-sessionmap-2",
+      "acpSideSessionId": "ses_279e9119bffeSJmWcA5zg25qQa",
+      "updatedAt": "2026-04-13T09:02:00+08:00",
+      "revision": 2
+    },
+    {
+      "cwd": "/home/base/repo/harness/nanobot-refactor",
+      "nanobotSideSessionKey": "nanobot-sessionmap-3",
+      "acpSideSessionId": "ses_279ee641dffe15sMkDoToDUP9y",
+      "updatedAt": "2026-04-13T09:03:00+08:00",
+      "revision": 3
+    },
+    {
+      "cwd": "/home/base/repo/harness/nanobot-refactor",
+      "nanobotSideSessionKey": "nanobot-sessionmap-4",
+      "acpSideSessionId": "ses_279f2edccffePtopm1IZX6MI3L",
+      "updatedAt": "2026-04-13T09:04:00+08:00",
+      "revision": 4
+    },
+    {
+      "cwd": "/home/base/repo/harness/nanobot-refactor",
+      "nanobotSideSessionKey": "nanobot-sessionmap-5",
+      "acpSideSessionId": "ses_27a0777a6ffeOp58pGYehgj7Rf",
+      "updatedAt": "2026-04-13T09:05:00+08:00",
+      "revision": 5
+    },
+    {
+      "cwd": "/home/base/repo/harness/nanobot-refactor",
+      "nanobotSideSessionKey": "nanobot-sessionmap-6",
+      "acpSideSessionId": "ses_27a0ed457ffe91wmx4DDs8Y90L",
+      "updatedAt": "2026-04-13T09:06:00+08:00",
+      "revision": 6
+    },
+    {
+      "cwd": "/home/base/repo/harness/nanobot-refactor",
+      "nanobotSideSessionKey": "nanobot-sessionmap-stale",
+      "acpSideSessionId": "ses_sessionmap_stale_for_reconcile_check",
+      "updatedAt": "2026-04-13T10:00:00+08:00",
+      "revision": 99
+    }
+  ]
+}

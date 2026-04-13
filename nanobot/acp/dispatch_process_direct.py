@@ -46,9 +46,10 @@ async def execute_process_request(
     if runtime._acp_client_conn is None:
         raise RuntimeError("ACP connection is not available")
     process_request = active_entry.process_request
-    prompt_meta: JSONMap = runtime.session_runtime_manager.build_prompt_metadata(
-        acp_side_session_id=active_entry.acp_side_session_id
+    caps = runtime.session_runtime_manager.get_session_capabilities(
+        active_entry.acp_side_session_id
     )
+    prompt_meta: JSONMap = caps.build_prompt_metadata() if caps is not None else {}
 
     try:
         await runtime.await_acp_prompt(
