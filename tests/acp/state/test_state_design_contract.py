@@ -30,12 +30,17 @@ class _RecordingRuntime:
 
         return self.workspace
 
-    async def publish_progress_outbound(self, *, outbound, on_progress=None) -> None:
-        """记录 progress outbound，并在需要时同步触发 on_progress 镜像。"""
+    async def global_publish_progress_outbound(
+        self,
+        *,
+        outbound,
+        request_key=None,
+        drop_if_inactive=False,
+    ) -> None:
+        """记录 progress outbound；测试替身只关注 state 是否成功把结果发往 runtime。"""
 
+        del request_key, drop_if_inactive
         self.progress_outbounds.append(outbound)
-        if on_progress is not None and getattr(outbound, "content", ""):
-            await on_progress(outbound.content)
 
 
 def _build_state_manager(tmp_path: Path) -> SessionStateManager:
@@ -65,9 +70,7 @@ async def test_message_text_only_commits_final_text_on_flush(tmp_path: Path) -> 
         }
     )
 
-    await state_manager.consume_session_update(
-        update, progress_router=state_manager.progress_router
-    )
+    await state_manager.consume_session_update(update)
 
     assert state_manager.request_scope.partial_text == "hello world"
     assert state_manager.request_scope.final_text == ""

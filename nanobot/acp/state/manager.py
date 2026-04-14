@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterable
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
+
+from loguru import logger
 
 from nanobot.acp.contracts import ACPCallbackUpdate, ObservabilityEventName, ObservabilityScopeName
 from nanobot.acp.observability import ObservabilityEvent
@@ -33,13 +35,14 @@ class _RuntimeObservabilityOwner(Protocol):
 
         ...
 
-    async def publish_progress_outbound(
+    async def global_publish_progress_outbound(
         self,
         *,
         outbound: OutboundMessage,
-        on_progress: ProgressCallback | None,
+        request_key: str | None = None,
+        drop_if_inactive: bool = False,
     ) -> None:
-        """发布 progress outbound 并镜像 `on_progress`；适用于 state flush 后的统一对外出口。"""
+        """发布 progress outbound 到全局总线；state 只把最终 outbound 交给 runtime。"""
 
         ...
 
@@ -194,28 +197,45 @@ class SessionStateManager:
         workspace = self._runtime.resolve_acp_workspace_path()
         return workspace / ".nanobot" / "acp-state-media" / self.request_key / family
 
-    async def publish_progress_outbound(self, *, outbound: OutboundMessage) -> None:
-        """委托 runtime 发布 progress outbound；bus 发送与 `on_progress` 镜像在同一时机触发。"""
+    async def state_publish_progress_outbound(self, *, outbound: OutboundMessage) -> None:
+        """发布 state progress outbound，并在 state owner 边界完成 `on_progress` 兼容镜像。"""
 
-        await self._runtime.publish_progress_outbound(
+        await self._runtime.global_publish_progress_outbound(
             outbound=outbound,
-            on_progress=self.on_progress,
+            request_key=self.request_key,
         )
+        if not outbound.content or self.on_progress is None:
+            return
+        callback_kwargs: dict[str, object] = {}
+        if outbound.metadata.get("tool_hint") is not None:
+            callback_kwargs["tool_hint"] = outbound.metadata["tool_hint"]
+        if outbound.metadata.get("tool_event") is not None:
+            callback_kwargs["tool_event"] = outbound.metadata["tool_event"]
+        callback = cast(Any, self.on_progress)
+        try:
+            await callback(outbound.content, **callback_kwargs)
+        except TypeError:
+            try:
+                if "tool_hint" in callback_kwargs:
+                    await callback(outbound.content, tool_hint=callback_kwargs["tool_hint"])
+                else:
+                    await callback(outbound.content)
+            except Exception:
+                logger.exception("ACP progress on_progress fallback failed")
+        except Exception:
+            logger.exception("ACP progress on_progress emit failed")
 
     def schedule_progress_outbound(self, *, outbound: OutboundMessage) -> None:
         """调度一次异步 progress 发布；供 handler 在同步 consume 中触发即时上发。"""
 
-        asyncio.create_task(self.publish_progress_outbound(outbound=outbound))
+        asyncio.create_task(self.state_publish_progress_outbound(outbound=outbound))
 
     async def consume_session_update(
         self,
         update: ACPCallbackUpdate,
-        *,
-        progress_router: ProgressRouter,
     ) -> None:
         """消费一条 ACP session update；适用于 runtime 回调进入状态域主链的场景。"""
 
-        del progress_router
         if self._closed:
             await self._runtime.push_observability(
                 ObservabilityEvent(

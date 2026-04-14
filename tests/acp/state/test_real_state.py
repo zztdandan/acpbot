@@ -62,7 +62,7 @@ class RecordingProgressRouter(ProgressRouter):
             flush_result=flush_result,
         )
         if outbound is not None:
-            await self._state_manager.publish_progress_outbound(outbound=outbound)
+            await self._state_manager.state_publish_progress_outbound(outbound=outbound)
 
 
 @asynccontextmanager
@@ -134,7 +134,7 @@ async def feed_notifications(
 
     for notification in notifications:
         assert notification.session_id == state_manager.acp_side_session_id
-        await state_manager.consume_session_update(notification.update, progress_router=router)
+        await state_manager.consume_session_update(notification.update)
         await asyncio.sleep(BURST_DELAY_SECONDS)
 
 

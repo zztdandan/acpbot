@@ -160,7 +160,7 @@ class ProgressRouter:
         )
         if outbound is None:
             return
-        await self._state_manager.publish_progress_outbound(outbound=outbound)
+        await self._state_manager.state_publish_progress_outbound(outbound=outbound)
 
     def _schedule_deadhand_locked(self, entry: PoolRuntimeEntry) -> None:
         """按池自己维护的 deadline 更新死手定时器；router 只同步 timeout handle。"""
@@ -199,7 +199,7 @@ class ProgressRouter:
             )
             self._state_manager.drop_pool_entry(pool_key)
         if outbound is not None:
-            await self._state_manager.publish_progress_outbound(outbound=outbound)
+            await self._state_manager.state_publish_progress_outbound(outbound=outbound)
 
     async def flush_all(self) -> None:
         """显式排空当前请求的全部池；用于测试、调试或需要立即观察 flush 结果的场景。"""

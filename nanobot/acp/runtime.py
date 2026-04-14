@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, AsyncContextManager, Awaitable, Callable, cast
+from typing import TYPE_CHECKING, AsyncContextManager, Awaitable, Callable, cast
 from uuid import uuid4
 
 from loguru import logger
@@ -329,35 +329,22 @@ class ACPRuntime:
             )
         )
 
-    async def publish_progress_outbound(
+    async def global_publish_progress_outbound(
         self,
         *,
         outbound: OutboundMessage,
-        on_progress: Callable[[str], Awaitable[None]] | None = None,
+        request_key: str | None = None,
+        drop_if_inactive: bool = False,
     ) -> None:
-        """发布 progress outbound，并在同一时机镜像给请求级 `on_progress`。"""
+        """发布 progress outbound 到总线；可按需在 runtime 边界丢弃已失活请求的旁路消息。"""
 
+        if drop_if_inactive and request_key is not None:
+            active_entry = self.process_runtime_manager.active_by_request_key.get(request_key)
+            if active_entry is None or active_entry.status != RequestStatus.ACTIVE:
+                # reuqestkey已经不在执行范围
+                return
+        # 只做 outbound发布，on_progress任务已owner到 state 完成
         await self.bus.publish_outbound(outbound)
-        if not outbound.content or on_progress is None:
-            return
-        callback_kwargs: dict[str, object] = {}
-        if outbound.metadata.get("tool_hint") is not None:
-            callback_kwargs["tool_hint"] = outbound.metadata["tool_hint"]
-        if outbound.metadata.get("tool_event") is not None:
-            callback_kwargs["tool_event"] = outbound.metadata["tool_event"]
-        callback = cast(Any, on_progress)
-        try:
-            await callback(outbound.content, **callback_kwargs)
-        except TypeError:
-            try:
-                if "tool_hint" in callback_kwargs:
-                    await callback(outbound.content, tool_hint=callback_kwargs["tool_hint"])
-                else:
-                    await callback(outbound.content)
-            except Exception:
-                logger.exception("ACP progress on_progress fallback failed")
-        except Exception:
-            logger.exception("ACP progress on_progress emit failed")
 
     async def handle_session_update(
         self, *, acp_side_session_id: str, update: ACPCallbackUpdate
@@ -384,10 +371,7 @@ class ACPRuntime:
             )
             return
         # 正常更新：委托给 state_manager 处理
-        await active_entry.state_manager.consume_session_update(
-            update,
-            progress_router=active_entry.progress_router,
-        )
+        await active_entry.state_manager.consume_session_update(update)
 
     async def handle_permission_request(
         self,
@@ -400,7 +384,7 @@ class ACPRuntime:
 
         处理流程：
             - 按 acp_side_session_id 查找活跃请求，不存在则上报 ORPHAN 并走默认策略；
-            - 正常路径委托 state_manager.handle_permission_request。
+            - 正常路径委托 progress_router.handle_permission_request。
 
         权限策略（acp_config.permissions_policy）：
             - STRICT: 全部拒绝 cancelled；
