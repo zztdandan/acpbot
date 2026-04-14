@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import TYPE_CHECKING, AsyncContextManager, Awaitable, Callable, cast
+from typing import TYPE_CHECKING, Any, AsyncContextManager, Awaitable, Callable, cast
 from uuid import uuid4
 
 from loguru import logger
@@ -64,6 +64,7 @@ class ACPRuntime:
         - process_runtime_manager — 请求队列、活跃请求双索引、/stop 与 rebuild；
         - inbound_manager — 入站消息路由（process_direct / dispatch_inbound）。
     """
+
     def __init__(
         self,
         *,
@@ -328,6 +329,36 @@ class ACPRuntime:
             )
         )
 
+    async def publish_progress_outbound(
+        self,
+        *,
+        outbound: OutboundMessage,
+        on_progress: Callable[[str], Awaitable[None]] | None = None,
+    ) -> None:
+        """发布 progress outbound，并在同一时机镜像给请求级 `on_progress`。"""
+
+        await self.bus.publish_outbound(outbound)
+        if not outbound.content or on_progress is None:
+            return
+        callback_kwargs: dict[str, object] = {}
+        if outbound.metadata.get("tool_hint") is not None:
+            callback_kwargs["tool_hint"] = outbound.metadata["tool_hint"]
+        if outbound.metadata.get("tool_event") is not None:
+            callback_kwargs["tool_event"] = outbound.metadata["tool_event"]
+        callback = cast(Any, on_progress)
+        try:
+            await callback(outbound.content, **callback_kwargs)
+        except TypeError:
+            try:
+                if "tool_hint" in callback_kwargs:
+                    await callback(outbound.content, tool_hint=callback_kwargs["tool_hint"])
+                else:
+                    await callback(outbound.content)
+            except Exception:
+                logger.exception("ACP progress on_progress fallback failed")
+        except Exception:
+            logger.exception("ACP progress on_progress emit failed")
+
     async def handle_session_update(
         self, *, acp_side_session_id: str, update: ACPCallbackUpdate
     ) -> None:
@@ -391,8 +422,8 @@ class ACPRuntime:
             )
             # 使用默认策略响应（不委托给 state_manager）
             return await self.permission_response(options)
-        # 正常权限请求：委托给 state_manager 处理
-        return await active_entry.state_manager.handle_permission_request(
+        # 正常权限请求：委托给 progress router 处理权限子域等待链
+        return await active_entry.progress_router.handle_permission_request(
             options=options, tool_call=tool_call
         )
 

@@ -127,6 +127,8 @@ class InboundContext:
     # 请求级进度回调。
     direct_response: OutboundMessage | None = None
     # 命中直返时的出站消息。
+    outbound_messages: list[OutboundMessage] = field(default_factory=list)
+    # TODO: 接入 inbound -> outbound 回发链路后，统一消费该缓冲池并逐条回发。
     process_request: ProcessRequest | None = None
     # 进入真实执行时的标准请求。
     artifacts: dict[str, ACPArtifactMap | list[ACPArtifactMap]] = field(default_factory=dict)

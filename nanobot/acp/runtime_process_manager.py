@@ -23,7 +23,7 @@ from nanobot.acp.runtime_models import (
     RequestStatus,
     SessionQueueState,
 )
-from nanobot.acp.state import ProgressRouter, SessionStateManager, _ACPDispatchError
+from nanobot.acp.state import SessionStateManager, _ACPDispatchError
 from nanobot.bus.events import OutboundMessage
 
 if TYPE_CHECKING:
@@ -95,7 +95,7 @@ class ProcessRuntimeManager:
         for active_entry in self.active_by_request_key.values():
             if active_entry.nanobot_side_session_key != nanobot_side_session_key:
                 continue
-            if active_entry.state_manager.has_pending_permission():
+            if active_entry.progress_router.has_pending_permission():
                 return active_entry
         return None
 
@@ -213,8 +213,7 @@ class ProcessRuntimeManager:
                 chat_id=process_request.chat_id,
                 on_progress=process_request.on_progress,
             )
-            progress_router = ProgressRouter(state_manager=state_manager)
-            state_manager.bind_progress_router(progress_router)
+            progress_router = state_manager.progress_router
             active_entry = ActiveProcessEntry(
                 request_key=process_request.request_key,
                 nanobot_side_session_key=process_request.nanobot_side_session_key,

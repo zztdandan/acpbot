@@ -1,4 +1,4 @@
-"""入站归一化与步骤编排层。"""
+"""入站媒体辅助：负责路径归一化、工作区约束校验与 artifact 构造。"""
 
 from __future__ import annotations
 
@@ -18,7 +18,13 @@ def normalize_inbound_media_paths(
     nanobot_side_session_key: str,
     channel: str,
 ) -> list[Path]:
-    """执行该方法定义的处理流程并返回结果。"""
+    """归一化入站媒体路径；只保留工作区内真实存在的本地文件。
+
+    处理流程：
+        - 解析原始媒体字符串，拒绝非 `file` 协议的远程路径
+        - 把相对路径补成 workspace 下绝对路径，再做 `resolve`
+        - 过滤掉工作区外或不存在的文件，并记录拒绝原因
+    """
 
     workspace = workspace.resolve()
     normalized: list[Path] = []
@@ -68,7 +74,13 @@ def build_media_artifacts(
     nanobot_side_session_key: str,
     channel: str,
 ) -> ACPArtifactList:
-    """执行该方法定义的处理流程并返回结果。"""
+    """构造入站媒体 artifact 列表；把合法文件转换为 ACP 可消费的结构化描述。
+
+    处理流程：
+        - 先复用路径归一化逻辑筛出合法本地文件
+        - 为每个文件补齐 `path`、`uri`、`name`、`mime_type`、`size`
+        - 返回可直接写入 `ProcessRequest.artifacts` 的列表
+    """
 
     artifacts: list[ACPArtifactMap] = []
     for path in normalize_inbound_media_paths(

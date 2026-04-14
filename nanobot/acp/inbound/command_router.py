@@ -1,4 +1,4 @@
-"""入站归一化与步骤编排层。"""
+"""入站命令路由器：在入站阶段处理 ACP slash 命令并生成直返消息。"""
 
 from __future__ import annotations
 
@@ -12,7 +12,12 @@ if TYPE_CHECKING:
 
 
 class CommandRouter:
-    """负责事件路由与进度输出编排。"""
+    """入站命令路由器：负责 slash 命令识别、执行与直返消息生成。
+
+    职责：
+        - 在入站阶段拦截 ACP slash 命令，避免普通文本继续进入执行链路
+        - 调用 runtime/sessionmap/session manager 完成 `/new`、`/stop`、`/models`、`/agents` 等操作
+    """
 
     HELP_TEXT = (
         "🐈 acpbot acp runtime commands:\n"
@@ -26,12 +31,12 @@ class CommandRouter:
     )
 
     def __init__(self, *, runtime: ACPRuntime) -> None:
-        """初始化当前对象并建立必要状态。"""
+        """建立命令路由器并绑定当前 runtime。"""
         self._runtime = runtime
 
     @staticmethod
     def parse_command(content: str) -> tuple[str, str]:
-        """解析命令输入并返回命令信息。"""
+        """解析命令文本并拆出命令字与参数；普通文本会返回空命令。"""
         raw = content.strip()
         if not raw:
             return "", ""
@@ -39,7 +44,13 @@ class CommandRouter:
         return parts[0].lower(), parts[1].strip() if len(parts) > 1 else ""
 
     async def maybe_handle(self, ctx: InboundContext) -> OutboundMessage | None:
-        """尝试处理命令并返回是否直返。"""
+        """尝试处理 slash 命令；命中时返回直返消息，未命中时返回空值。
+
+        处理流程：
+            - 先解析入站文本，非 slash 命令直接放行
+            - 对已知命令调用对应 runtime 能力，并把结果转成直返消息
+            - 未知命令显式回包，避免静默吞掉用户输入
+        """
         command, arg = self.parse_command(ctx.content)
         if not command.startswith("/"):
             return None
@@ -128,7 +139,7 @@ class CommandRouter:
 
     @staticmethod
     def _reply(ctx: InboundContext, content: str) -> OutboundMessage:
-        """构造命令回复消息。"""
+        """构造命令直返消息；统一复用当前上下文的 channel 与 chat_id。"""
         return OutboundMessage(
             channel=ctx.channel,
             chat_id=ctx.chat_id,
