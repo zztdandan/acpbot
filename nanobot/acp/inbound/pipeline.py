@@ -14,6 +14,13 @@ if TYPE_CHECKING:
 InboundStep = Callable[[InboundContext], Awaitable[None]]
 
 
+def _looks_like_permission_reply_text(content: str) -> bool:
+    """做轻量 permission reply 识别；用于 pending 查询前的快速分流。"""
+
+    normalized = content.strip().lower()
+    return normalized.startswith("/permission ") or normalized.startswith("permission ")
+
+
 def build_normalize_step(runtime: ACPRuntime) -> InboundStep:
     """构造入站归一化步骤；统一补齐上下文中的空字符串、空列表与空字典。"""
 
@@ -38,18 +45,24 @@ def build_permission_inbound_step(runtime: ACPRuntime) -> InboundStep:
             - 再判断当前文本是否像权限回复，避免误拦截普通消息
             - 命中时消费回复，并把确认文本写入 `direct_response`
         """
+        # 先做文本级 permission reply 判定，避免普通消息误命中 not-found 直返。
+        if not _looks_like_permission_reply_text(ctx.content):
+            return
         active_entry = runtime.process_runtime_manager.find_request_waiting_permission(
             nanobot_side_session_key=ctx.nanobot_side_session_key,
         )
         if active_entry is None:
+            ctx.direct_response = runtime.new_outbound_message(
+                channel=ctx.channel,
+                chat_id=ctx.chat_id,
+                content="No pending permission request.",
+            )
             return
-        if not active_entry.progress_router.looks_like_permission_reply(ctx.content):
-            return
-        ack = await active_entry.progress_router.handle_permission_reply(reply_text=ctx.content)
+        await active_entry.progress_router.handle_permission_reply(reply_text=ctx.content)
         ctx.direct_response = runtime.new_outbound_message(
             channel=ctx.channel,
             chat_id=ctx.chat_id,
-            content=ack,
+            content="Permission accepted.",
         )
 
     return _permission_inbound
@@ -87,14 +100,21 @@ def build_media_prepare_step(runtime: ACPRuntime) -> InboundStep:
             channel=ctx.channel,
         )
         if ctx.media and len(media_artifacts) != len(ctx.media):
-            # media 校验失败时不触发 direct_response，避免提前中断 inbound pipeline。
-            ctx.outbound_messages.append(
-                runtime.new_outbound_message(
+            invalid_count = len(ctx.media) - len(media_artifacts)
+            # 当前版本暂不消费 `ctx.outbound_messages`，所以全失败时必须直返，避免静默进入执行层。
+            if not media_artifacts:
+                ctx.direct_response = runtime.new_outbound_message(
                     channel=ctx.channel,
                     chat_id=ctx.chat_id,
                     content="Inbound media validation failed. Only existing workspace-local files are allowed.",
                 )
-            )
+                return
+            # 部分成功继续执行，并把 warning 落到 artifacts，供后续观测/调试消费。
+            ctx.artifacts["media_validation_warning"] = {
+                "message": "Some inbound media paths were rejected.",
+                "invalid_count": invalid_count,
+                "accepted_count": len(media_artifacts),
+            }
         ctx.artifacts["media_artifacts"] = media_artifacts
 
     return _media_prepare

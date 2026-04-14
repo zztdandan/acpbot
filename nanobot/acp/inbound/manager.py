@@ -11,6 +11,7 @@ from nanobot.acp.inbound.pipeline import (
     build_permission_inbound_step,
     build_process_request_step,
 )
+
 from nanobot.acp.runtime_models import InboundContext, ProcessDirectInput
 
 
@@ -91,9 +92,10 @@ class InboundManager:
         await self._run_pipeline(ctx, steps=self.bus_inbound_steps())
 
     def process_direct_steps(self) -> list[InboundStep]:
-        """返回 direct 输入使用的固定步骤链；省略权限回复拦截分支。"""
+        """返回 direct 输入使用的固定步骤链；允许 direct 入口显式回复 permission。"""
         return [
             build_normalize_step(self._runtime),
+            build_permission_inbound_step(self._runtime),
             build_command_router_step(self._command_router),
             build_media_prepare_step(self._runtime),
             build_process_request_step(self._runtime),
