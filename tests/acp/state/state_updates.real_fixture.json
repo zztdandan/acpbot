@@ -90,19 +90,12 @@
       ],
       "expected": {
         "progressText": [
-          "State",
-          "State module",
-          "State module accepts",
           "State module accepts updates fast."
         ],
         "progressMedia": [
           [
-            "/tmp/acp-state/message/latency-plot.png"
-          ],
-          [
-            "/tmp/acp-state/message/latency-report.json"
-          ],
-          [
+            "/tmp/acp-state/message/latency-plot.png",
+            "/tmp/acp-state/message/latency-report.json",
             "/tmp/acp-state/message/latency-summary.md"
           ]
         ],
@@ -209,18 +202,12 @@
           }
         }
       ],
-      "expected": {
-        "toolHints": [
-          "Running tool: tool",
-          "in_progress",
-          "completed"
-        ],
-        "toolMedia": [
-          "/tmp/acp-state/tool/start-readme.md",
-          "/tmp/acp-state/tool/progress-plot.png",
-          "/tmp/acp-state/tool/progress-summary.md"
-        ]
-      }
+        "expected": {
+          "toolHints": [
+            "Read state fixture inputs [completed]"
+          ],
+          "toolMedia": []
+        }
     },
     "mixed": {
       "notifications": [
@@ -392,15 +379,10 @@
           "media": [
             "/tmp/acp-state/message/latency-plot.png",
             "/tmp/acp-state/message/latency-report.json",
-            "/tmp/acp-state/message/latency-summary.md",
-            "/tmp/acp-state/tool/start-readme.md",
-            "/tmp/acp-state/tool/progress-plot.png",
-            "/tmp/acp-state/tool/progress-summary.md"
+            "/tmp/acp-state/message/latency-summary.md"
           ],
           "toolHints": [
-            "Running tool: tool",
-            "in_progress",
-            "completed"
+            "Read state fixture inputs [completed]"
           ]
         }
       }

@@ -44,17 +44,25 @@ class RecordingProgressRouter(ProgressRouter):
     def __init__(
         self, *, state_manager: SessionStateManager, queue: asyncio.Queue[ProgressEnvelope]
     ) -> None:
-        super().__init__(state_manager=state_manager)
+        super().__init__(
+            state_manager=state_manager,
+            permission_coordinator=state_manager.permission_coordinator,
+        )
         self._queue = queue
 
-    async def emit(self, result) -> None:  # type: ignore[override]
-        if self._closed or result is None:
+    async def publish_progress_flush(self, *, flushed_handler, flush_result) -> None:  # type: ignore[override]
+        if self._closed:
             return
-        content, metadata, media = build_progress_payload(result)
+        content, metadata, media = build_progress_payload(flush_result)
         await self._queue.put(
             ProgressEnvelope(content=content, metadata=dict(metadata), media=list(media))
         )
-        await self._state_manager.emit_progress(content=content, metadata=metadata)
+        outbound = flushed_handler.build_progress_outbound(
+            state_manager=self._state_manager,
+            flush_result=flush_result,
+        )
+        if outbound is not None:
+            await self._state_manager.publish_progress_outbound(outbound=outbound)
 
 
 @asynccontextmanager
@@ -87,7 +95,7 @@ async def open_real_state_manager(
         )
         queue: asyncio.Queue[ProgressEnvelope] = asyncio.Queue()
         router = RecordingProgressRouter(state_manager=state_manager, queue=queue)
-        state_manager.bind_progress_router(router)
+        state_manager._progress_router = router
         yield state_manager, router, queue
     finally:
         await close_runtime_quietly(runtime)
