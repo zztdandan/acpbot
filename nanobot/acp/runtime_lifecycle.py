@@ -1,4 +1,14 @@
-"""运行时主入口与请求等待主链。"""
+"""ACP 运行时生命周期管理：连接建立、重置、关闭。
+
+职责：
+    - ensure_connection: 建立 ACP 连接（含 SDK spawn + initialize + binding 对账）
+    - reset_connection: 重置连接并清理全部代际状态（process/sessionmap/wait）
+    - close_runtime: 关闭运行时（stop + reset + 停止观测）
+    - _clear_connection_handles_without_lock: 内部清理连接句柄（无锁版本，调用方已持锁）
+
+设计约束：
+    连接操作受 _acp_connection_lock 保护，防止并发重建。
+"""
 
 from __future__ import annotations
 
@@ -17,7 +27,13 @@ if TYPE_CHECKING:
 
 
 async def _clear_connection_handles_without_lock(runtime: ACPRuntime) -> None:
-    """执行该方法定义的处理流程并返回结果。"""
+    """清理连接句柄并关闭 context manager（无锁版本，调用方已持有 _acp_connection_lock）。
+
+    处理流程：
+        1. 取出旧的 connection_cm，调用 __aexit__ 释放子进程
+        2. 将 _acp_client_conn / _acp_agent_process / _acp_client_connection_cm 全部置 None
+        3. __aexit__ 失败时仅 warning 不抛出（避免影哏重置链路）
+    """
 
     old_cm = runtime._acp_client_connection_cm
     if old_cm is not None:
@@ -35,7 +51,24 @@ async def _clear_connection_handles_without_lock(runtime: ACPRuntime) -> None:
 
 
 async def ensure_connection(runtime: ACPRuntime) -> None:
-    """确保协议连接处于可用状态。"""
+    """确保 ACP 协议连接可用（已连接则直接返回，未连接则建立新连接）。
+
+    处理流程：
+        1. 快速路径：_acp_client_conn 已存在则直接返回
+        2. 加锁后二次检查（double-check locking）
+        3. 创建 _NanobotACPClient 并 spawn ACP Agent 子进程
+        4. 等待连接 __aenter__ + initialize 完成（带 startup_timeout）
+        5. 推送 CONNECTION_READY 观测事件
+        6. 触发 sessionmap binding 对账（load_persistent_truth）
+
+    失败处理：
+        - 连接异帰时清理全部代际状态（process rebuild + session rebuild + binding unbootstrap + fail all waits）
+        - 异常向上抛出，由调用方决定 далее重试或降级
+
+    异常：
+        RuntimeError: 连接建立失败
+        asyncio.TimeoutError: 连接或 initialize 超时
+    """
 
     if runtime._acp_client_conn is not None:
         return
@@ -91,7 +124,16 @@ async def ensure_connection(runtime: ACPRuntime) -> None:
 
 
 async def reset_connection(runtime: ACPRuntime) -> None:
-    """重置协议连接并清理代际状态。"""
+    """重置 ACP 连接并清理全部代际状态（连接、进程、会话、等待链）。
+
+    处理流程：
+        1. 加锁后调用 _clear_connection_handles_without_lock 清理连接句柄
+        2. 重建 process_runtime_manager（失败所有活跃/排队请求）
+        3. 重建 session_runtime_manager（清空内存条目）
+        4. 标记 binding 未启动（mark_unbootstrapped，下次 ensure 时重新对账）
+        5. 失败所有 wait_entry
+        6. 推送 CONNECTION_RESET 观测事件
+    """
 
     async with runtime._acp_connection_lock:
         await _clear_connection_handles_without_lock(runtime)
@@ -108,7 +150,13 @@ async def reset_connection(runtime: ACPRuntime) -> None:
 
 
 async def close_runtime(runtime: ACPRuntime) -> None:
-    """启动主循环并持续消费入站消息。"""
+    """关闭运行时：标记停止、重置连接、停止观测管理器。
+
+    处理流程：
+        1. 设置 _running = False（通知主循环退出）
+        2. 调用 reset_connection 清理全部连接与代际状态
+        3. 调用 observability_manager.stop() 停止观测队列
+    """
 
     runtime._running = False
     await reset_connection(runtime)

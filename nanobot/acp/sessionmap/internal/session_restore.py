@@ -1,7 +1,15 @@
-"""ACP existing-session restore helper.
+"""ACP 会话恢复工具：resume_session 优先，load_session 兜底。
 
-This module keeps a single restore rule for nanobot/acp session recovery:
-always try `resume_session` first, then fallback to `load_session`.
+核心职责：
+    提供统一的会话恢复入口，固定采用 resume_session -> load_session 的回退策略。
+
+使用场景：
+    - ensure_ready_session 检测到已有会话时调用本函数恢复
+    - 对账流程中需要重新激活现有会话时调用本函数
+
+设计约束：
+    - 不同 ACP backend 可能只支持 resume_session 或 load_session
+    - 当两者都存在时，优先使用 resume_session（更轻量）
 """
 
 from __future__ import annotations
@@ -17,19 +25,32 @@ async def restore_existing_session(
     cwd: str,
     session_id: str,
 ) -> ACPSessionPayload | None:
-    """Restore an existing ACP session with the fixed resume-then-load rule.
+    """恢复现有 ACP 会话：resume_session 优先，load_session 兜底。
 
-    Compatibility notes:
-        - Some ACP backends expose `resume_session`
-        - Some ACP backends expose `load_session`
-        - When both exist, nanobot/acp always prefers `resume_session`
+    处理流程：
+        1. 尝试 resume_session：
+           - 检测 conn 是否有 resume_session 方法
+           - 有则调用并返回结果（resume 是更轻量的恢复路径）
+        2. resume_session 缺失或抛出异常时回退到 load_session：
+           - 检测 conn 是否有 load_session 方法
+           - 有则调用并返回结果
+        3. 两者都缺失时返回 None（表示无法恢复）
+        4. 两者都失败时抛出最后一个异常（便于调用方统一记录）
 
-    Behavior:
-        1. Try `resume_session` first because it is the lighter restore path
-        2. If `resume_session` is missing or raises, fallback to `load_session`
-        4. If both methods are missing, return None
-        5. If both methods fail, re-raise the last error so the caller can log
-           one failure outcome for the whole restore attempt
+    参数：
+        conn: ACP 客户端连接对象（必须有 resume_session 或 load_session 方法）
+        cwd: 工作区路径（传递给恢复方法的参数之一）
+        session_id: 要恢复的 ACP 侧会话 ID
+
+    返回：
+        ACPSessionPayload | None: 恢复后的 session payload
+                               - None 表示 conn 不支持任何恢复方法
+                               - 成功时返回完整的 session payload
+
+    兼容性说明：
+        - 某些 ACP backend 只暴露 resume_session
+        - 某些 ACP backend 只暴露 load_session
+        - 当两者都存在时，nanobot/acp 固定优先 resume_session
     """
 
     resume_session = cast(

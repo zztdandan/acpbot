@@ -34,13 +34,20 @@ def _now_iso_with_tz() -> str:
 class SessionMapBindingManager:
     """会话绑定管理器：持久化绑定 CRUD + 启动对账。
 
-    主要状态：
-        _entries: nanobot_side_session_key → SessionMapBindingEntry
-        _bootstrapped: 是否已完成启动对账
+    职责：
+        - 持久化绑定条目的 CRUD 操作（增删改查）
+        - 启动时对账（load_persistent_truth）：从磁盘加载 + 与 ACP 侧会话列表对账
+        - 工作区隔离（按 cwd 过滤绑定）
+        - 原子写入（保留其他 cwd 绑定，只更新当前 cwd）
+
+    生命周期：
+        - 创建：ACPRuntime 初始化时实例化，构造时不读取磁盘
+        - 启动对账：load_persistent_truth 加载磁盘数据 + 与 ACP 侧对账
+        - 重置：mark_unbootstrapped 重置对账标志（不清除内存条目）
     """
 
     def __init__(self, owner: ACPRuntime) -> None:
-        """初始化。磁盘数据在 load_persistent_truth 中加载，构造时不读取。"""
+        """初始化（构造时不读取磁盘，load_persistent_truth 才加载）。"""
         self._owner = owner
         self._session_map_file = get_data_dir() / "acp" / "session_map.json"
         self._entries: dict[str, SessionMapBindingEntry] = {}
@@ -140,15 +147,16 @@ class SessionMapBindingManager:
         return old.acp_side_session_id if old is not None else None
 
     def bind_session(self, nanobot_side_session_key: str, acp_side_session_id: str) -> None:
-        """建立或更新绑定并 persist。
+        """建立或更新绑定并持久化。
 
         处理流程：
-            1. 清理冲突：如果 acp_id 已绑到其他 nanobot_key，删除旧绑定
-            2. 新建绑定（revision=1），或更新已有绑定（revision+1）
-            3. acp_id 未变时幂等返回
+            1. 清理冲突：如果 acp_id 已绑到其他 nanobot_key，删除旧绑定（保证 acp_id 唯一性）
+            2. 新建绑定（revision=1）或更新已有绑定（revision+1）
+            3. acp_id 未变时幂等返回（不修改 revision）
 
-        使用示例：
-            binding_manager.bind_session("user123:chat456", "abc123")
+        参数：
+            nanobot_side_session_key: nanobot 侧会话标识（如 "user_id:chat_id"）
+            acp_side_session_id: ACP 侧会话 ID（如 "abc123"）
         """
         current_cwd = str(self._owner.resolve_acp_workspace_path())
         now = _now_iso_with_tz()

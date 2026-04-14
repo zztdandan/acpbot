@@ -23,7 +23,19 @@ if TYPE_CHECKING:
 
 
 class SessionRuntimeManager:
-    """运行时会话管理器：管理内存中的会话状态与能力缓存，通过 asyncio.Lock 保护并发。"""
+    """运行时会话管理器：管理内存中的会话状态与能力缓存，通过 asyncio.Lock 保护并发。
+
+    职责：
+        - 维护运行时会话条目的双向索引（nanobot_side_session_key / acp_side_session_id）
+        - 提供会话能力缓存查询与更新接口
+        - 确保会话就绪（ensure_ready_session）：恢复现有会话或创建新会话
+        - 统一刷写 model/agent 选择到 ACP、持久化真相与本地能力缓存
+
+    生命周期：
+        - 创建：ACPRuntime 初始化时实例化，传入 runtime 和 binding_manager 依赖
+        - 重建：rebuild 方法清空所有内存条目（不影响持久化数据）
+        - 销毁：ACPRuntime 销毁时一同销毁
+    """
 
     def __init__(
         self,
@@ -31,14 +43,7 @@ class SessionRuntimeManager:
         runtime: ACPRuntime,
         binding_manager: SessionMapBindingManager,
     ) -> None:
-        """初始化运行时会话管理器。
-
-        使用示例：
-            runtime_manager = SessionRuntimeManager(
-                runtime=runtime,
-                binding_manager=binding_manager,
-            )
-        """
+        """初始化运行时会话管理器（依赖注入 runtime 和 binding_manager）。"""
         self._runtime = runtime
         self._binding_manager = binding_manager
         self._lock = asyncio.Lock()
@@ -96,10 +101,18 @@ class SessionRuntimeManager:
 
         处理流程：
             1. 建立 ACP 连接，不可用时抛出 RuntimeError
-            2. 检查内存中是否有就绪会话（最快路径）
-            3. 查询 binding truth 是否有映射（常规恢复）
-            4. 若 binding 未 bootstrapped，补做 load + reconcile 再复查
-            5. 恢复失败或无映射时走新会话兜底
+            2. 内存命中检查：有就绪会话则直接返回（最快路径）
+            3. 查询 binding truth：有映射则尝试激活现有会话
+            4. binding 未 bootstrapped 时补做 load + reconcile 再复查
+            5. 恢复失败或无映射时创建新会话（兜底）
+
+        参数：
+            nanobot_side_session_key: nanobot 侧会话标识（如 "user_id:chat_id" 或 "cli:direct"）
+            preferred_model: 期望的模型 ID（如 "gpt-4"），None 表示使用会话当前模型
+            preferred_agent: 期望的代理 ID（如 "code-assistant"），None 表示使用会话当前代理
+
+        返回：
+            str: ACP 侧会话 ID（可用于后续 ACP API 调用）
 
         异常：
             RuntimeError: ACP 连接不可用
@@ -186,9 +199,21 @@ class SessionRuntimeManager:
         """将 model/agent 选择统一刷到 ACP、持久化真相与本地能力缓存。
 
         处理流程：
-            1. 若 ACP 连接不可用则静默返回
-            2. 刷 model_id → ACP API + 能力缓存 + 持久化绑定
-            3. 刷 agent_id → ACP API + 能力缓存 + 持久化绑定
+            1. 检查 ACP 连接可用性，不可用时静默返回
+            2. 刷 model_id（如果提供）：
+               - 调用 ACP set_session_model API
+               - 更新本地能力缓存（remember_current_model）
+               - 更新持久化绑定（update_bound_model）
+            3. 刷 agent_id（如果提供）：
+               - 调用 ACP set_session_mode API
+               - 更新本地能力缓存（remember_current_agent）
+               - 更新持久化绑定（update_bound_agent）
+
+        参数：
+            acp_side_session_id: ACP 侧会话 ID（目标会话）
+            nanobot_side_session_key: nanobot 侧会话标识（用于更新持久化绑定）
+            model_id: 模型 ID（如 "gpt-4"），None 表示不更新模型
+            agent_id: 代理 ID（如 "code-assistant"），None 表示不更新代理
         """
         conn = self._runtime._acp_client_conn
         if conn is None:
@@ -214,17 +239,25 @@ class SessionRuntimeManager:
         nanobot_side_session_key: str,
         acp_side_session_id: str,
     ) -> tuple[bool, ACPSessionPayload | None]:
-        """按需把已有 binding 对应的 ACP session 接入当前 runtime。
+        """激活现有 binding 对应的 ACP session（接入当前 runtime）。
 
-        该方法属于 runtime owner：
-            - 是否需要激活由 ensure_ready_session 决定
-            - 激活动作依赖当前 ACP 连接
-            - 激活结果直接服务于 runtime ready entry 建立
+        职责：
+            - 调用 restore_existing_session 恢复会话（resume -> load 回退）
+            - 恢复成功返回 (True, payload)，失败返回 (False, None)
+            - 属于 runtime owner 方法：激活动作依赖当前 ACP 连接
+
+        参数：
+            nanobot_side_session_key: nanobot 侧会话标识
+            acp_side_session_id: ACP 侧会话 ID（要激活的目标会话）
+
+        返回：
+            tuple[bool, ACPSessionPayload | None]:
+                - bool: 是否激活成功（True 表示成功，False 表示失败）
+                - ACPSessionPayload | None: 恢复后的 session payload（成功时返回）
 
         兼容性说明：
-            实际的 resume/load fallback 逻辑统一收口到
-            sessionmap.internal.session_restore，避免多个调用点各自维护。
-            其中顺序固定为 resume -> load，不允许再引入 load-first 分支。
+            resume/load fallback 逻辑统一收口到 sessionmap.internal.session_restore，
+            顺序固定为 resume -> load，不允许再引入 load-first 分支。
         """
 
         conn = self._runtime._acp_client_conn

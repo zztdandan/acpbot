@@ -1,4 +1,14 @@
-"""运行时共享模型定义。"""
+"""运行时共享模型：请求/响应/入站/执行/队列/停止等核心数据结构。
+
+核心类：
+    - RuntimeWaitEntry — 异步等待链条目（request_key → Future）
+    - ProcessDirectInput — CLI/直接入口的规范化输入
+    - ProcessRequest — 入站层交给执行管理器的标准请求
+    - InboundContext — 入站流水线统一上下文（步骤间共享状态）
+    - ActiveProcessEntry — 活跃执行请求条目（含状态管理器和进度路由器）
+    - SessionQueueState — 单会话串行队列状态
+    - StopResult — /stop 命令的结构化结果
+"""
 
 from __future__ import annotations
 
@@ -9,7 +19,6 @@ from enum import Enum
 from typing import TYPE_CHECKING, Awaitable, Callable
 
 from nanobot.acp.contracts import ACPArtifactMap, ACPChannelName, ACPDirectIdentity, JSONMap
-
 from nanobot.bus.events import InboundMessage, OutboundMessage
 
 if TYPE_CHECKING:
@@ -21,7 +30,7 @@ ProgressCallback = Callable[..., Awaitable[None]]
 
 
 class RequestStatus(str, Enum):
-    """请求在执行管理中的生命周期状态。"""
+    """请求在执行管理中的生命周期状态（queued → starting → active → finishing → completed/failed/cancelled）。"""
 
     QUEUED = "queued"
     STARTING = "starting"
@@ -34,7 +43,7 @@ class RequestStatus(str, Enum):
 
 @dataclass(slots=True)
 class RuntimeWaitEntry:
-    """运行时等待条目。"""
+    """运行时等待条目：request_key 到异步 Future 的映射，用于 await 最终响应。"""
 
     request_key: str
     # 请求唯一键，用于匹配完成通知。
@@ -44,7 +53,7 @@ class RuntimeWaitEntry:
 
 @dataclass(slots=True)
 class ProcessDirectInput:
-    """直接入口规范化输入。"""
+    """CLI/直接入口的规范化输入：文本内容、通道标识、媒体路径和进度回调。"""
 
     content: str
     # 文本输入内容。
@@ -66,7 +75,7 @@ class ProcessDirectInput:
 
 @dataclass(slots=True)
 class ProcessRequest:
-    """入站层交给执行管理器的标准请求。"""
+    """入站层交给执行管理器的标准请求：包含完整的执行上下文（会话、通道、内容、媒体、进度回调）。"""
 
     request_key: str
     # 请求唯一键。
@@ -92,7 +101,7 @@ class ProcessRequest:
 
 @dataclass(slots=True)
 class InboundContext:
-    """入站流水线统一上下文。"""
+    """入站流水线统一上下文：流水线各步骤（校验/路由/直返/执行）间的共享状态。"""
 
     request_key: str
     # 请求唯一键。
@@ -126,7 +135,7 @@ class InboundContext:
 
 @dataclass(slots=True)
 class ActiveProcessEntry:
-    """活跃执行请求条目。"""
+    """活跃执行请求条目：持有完整的运行态资源（请求、状态管理器、进度路由器、生命周期）。"""
 
     request_key: str
     # 请求唯一键。
@@ -144,14 +153,14 @@ class ActiveProcessEntry:
     # 当前生命周期状态。
 
     async def close(self) -> None:
-        """关闭该请求持有的状态资源。"""
+        """关闭该请求持有的状态资源（state_manager + progress_router）。"""
 
         await self.state_manager.close()
 
 
 @dataclass(slots=True)
 class SessionQueueState:
-    """单会话串行队列状态。"""
+    """单会话串行队列状态：维护排队请求列表与当前 draining_task 协程句柄。"""
 
     nanobot_side_session_key: str
     # 队列所属业务侧会话。
@@ -163,7 +172,7 @@ class SessionQueueState:
 
 @dataclass(slots=True)
 class StopResult:
-    """停止会话后的结构化结果。"""
+    """停止会话后的结构化结果：包含取消指令状态与被丢弃的排队请求数。"""
 
     nanobot_side_session_key: str
     # 被停止的业务侧会话主键。
@@ -176,5 +185,5 @@ class StopResult:
 
     @property
     def had_anything_to_stop(self) -> bool:
-        """判断停止动作是否命中活跃或排队请求。"""
+        """判断停止动作是否命中活跃或排队请求（active_cancel_requested or dropped_queued_count > 0）。"""
         return self.active_cancel_requested or self.dropped_queued_count > 0
