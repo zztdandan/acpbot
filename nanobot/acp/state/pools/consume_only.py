@@ -7,7 +7,7 @@ from nanobot.acp.state.pools.base import ACPPoolBase
 
 
 class ConsumeOnlyPool(ACPPoolBase):
-    """消费池：吞掉输入并在需要时立刻进入终态，适合 config/usage 等静态更新。"""
+    """消费池：吞掉输入并在需要时立刻进入终态，适合静态事实类更新。"""
 
     bucket_type = ACPBucketType.CONSUME_ONLY
 
@@ -20,7 +20,7 @@ class ConsumeOnlyPool(ACPPoolBase):
         self.last_payload: object | None = None
 
     def _accept(self, payload: object) -> None:
-        """记录最后一次输入；仅做事实保留，不生成 progress。"""
+        """记录最后一次输入；仅做事实保留，不生成进度片段。"""
 
         self.accept_count += 1
         self.last_payload = payload
@@ -28,17 +28,17 @@ class ConsumeOnlyPool(ACPPoolBase):
             self.mark_terminal()
 
     def flush(self) -> FlushResult | None:
-        """消费池不会产生外部可见 progress。"""
+        """消费池不会产生外部可见进度。"""
 
         return None
 
 
 class OtherPool(ConsumeOnlyPool):
-    """other 池：收口未识别更新，并在单次消费后立即转入销毁流程。"""
+    """`other` 池：收口未识别更新，并在单次消费后立即转入销毁流程。"""
 
     bucket_type = ACPBucketType.OTHER
 
     def __init__(self, *, bucket_key: str) -> None:
-        """建立 other 池；保证未知类型只短暂落池后即销毁。"""
+        """建立 `other` 池；保证未知类型只短暂落池后即销毁。"""
 
         super().__init__(bucket_key=bucket_key, destroy_after_accept=True)

@@ -1,4 +1,4 @@
-"""SessionStateManager：单请求 state owner，统一持有池索引、权限等待与 final 聚合。"""
+"""单请求状态管理器：统一持有池索引、权限等待与最终结果聚合。"""
 
 from __future__ import annotations
 
@@ -32,20 +32,20 @@ if TYPE_CHECKING:
 
 
 class _RuntimeObservabilityOwner(Protocol):
-    """运行时观测上报协议：state 只发事实，不直接操作 observability 内部队列。"""
+    """运行时观测上报协议：状态域只上报事实，不直接操作观测队列内部细节。"""
 
     async def push_observability(self, event: ObservabilityEvent) -> None:
-        """上报一条结构化观测事件。"""
+        """上报一条结构化观测事件；供运行时归属对象统一分发。"""
         ...
 
 
 class SessionStateManager:
-    """单请求状态管理器：统一 owner 池索引、权限等待、request-scope 聚合与 final materialize。
+    """单请求状态管理器：统一归属池索引、权限等待、请求级聚合与最终物化。
 
     职责：
         - 以 `PoolKey -> pool` 形式持有当前请求全部池实例，替代“每类一个成员变量”的旧模式
-        - 提供权限请求/回复入口，保证 pending future 生命周期收口在 state 内
-        - 维护 final_text / media_paths / final_metadata，作为最终结果物化事实源
+        - 提供权限请求与回复入口，保证待回复 future 生命周期收口在状态域内
+        - 维护最终文本、媒体与元数据，作为最终物化的唯一事实源
 
     生命周期：
         - 创建：请求真正进入 ACP 执行时，由 ProcessRuntimeManager 新建
@@ -63,7 +63,7 @@ class SessionStateManager:
         chat_id: str,
         on_progress: ProgressCallback | None,
     ) -> None:
-        """建立单请求 state；所有依赖都按请求粒度注入，避免 runtime 顶层共享字典回潮。"""
+        """建立单请求状态；所有依赖都按请求粒度注入，避免运行时顶层共享字典回潮。"""
 
         self._runtime = runtime
         self.request_key = request_key
@@ -80,12 +80,12 @@ class SessionStateManager:
         self._pending_permission_request: PendingPermissionRequest | None = None
 
     def is_closed(self) -> bool:
-        """返回当前 state 是否已关闭；late update/permission 会据此拒绝写入。"""
+        """返回当前状态是否已关闭；迟到更新或权限请求会据此拒绝写入。"""
 
         return self._closed
 
     def bind_progress_router(self, progress_router: ProgressRouter) -> None:
-        """绑定请求级 ProgressRouter；供权限分支与普通更新共享同一出口。"""
+        """绑定请求级进度路由器；让权限分支与普通更新共用同一输出出口。"""
 
         self._progress_router = progress_router
 
@@ -95,7 +95,13 @@ class SessionStateManager:
         *,
         factory: Callable[[], ACPPool],
     ) -> ACPPool:
-        """按池主键复用或创建池实例；tool 等多实例类型依赖此入口隔离并发。"""
+        """按池主键复用或创建池实例；多实例池依赖此入口隔离并发。
+
+        处理流程：
+            - 先按 `PoolKey` 查询当前请求是否已存在对应池
+            - 未命中时调用 `factory` 创建新池并写入索引
+            - 返回可供处理器继续消费的池实例
+        """
 
         pool = self._pools.get(pool_key)
         if pool is None:
@@ -104,24 +110,30 @@ class SessionStateManager:
         return pool
 
     def destroy_pool(self, pool_key: PoolKey) -> None:
-        """从索引中销毁一个池；适用于 other 一次性池与 request close 收尾。"""
+        """从索引中销毁一个池；适用于一次性池和请求关闭收尾场景。"""
 
         self._pools.pop(pool_key, None)
 
     def iter_pools(self) -> Iterable[tuple[PoolKey, ACPPool]]:
-        """遍历当前所有活跃池；router close/flush_all 通过该入口统一处理。"""
+        """遍历当前所有活跃池；供路由器统一执行 `flush_all` 与 `close`。"""
 
         return tuple(self._pools.items())
 
     def update_text_snapshot(self, text: str) -> None:
-        """刷新 final_text 与 partial_text；供文本 handler 在每次增量后同步。"""
+        """刷新最终文本与部分文本快照；供文本类处理器在每次增量后同步。"""
 
         normalized = text.strip()
         self.request_scope.final_text = normalized
         self.request_scope.partial_text = normalized
 
     def append_media_path(self, media_path: str, *, source: str = "message") -> None:
-        """把媒体路径并入请求聚合结果；消息媒体排前，工具附件排后，避免最终顺序漂移。"""
+        """把媒体路径并入请求聚合结果；保持消息媒体在前、工具附件在后的稳定顺序。
+
+        处理流程：
+            - 先按来源选择消息媒体列表或工具媒体列表
+            - 去重追加到目标列表，避免同一路径被重复输出
+            - 重新生成 `media_paths` 合并视图，保证最终物化顺序稳定
+        """
 
         if not media_path:
             return
@@ -138,12 +150,12 @@ class SessionStateManager:
         ]
 
     def update_named_metadata(self, key: str, payload: object) -> None:
-        """把一条命名事实写入 final_metadata；仅显式采纳的字段允许进入最终结果。"""
+        """把一条命名事实写入最终元数据；仅显式采纳的字段允许进入最终结果。"""
 
         self.request_scope.final_metadata[key] = sanitize_json_value(payload)
 
     def append_other_update(self, *, label: str, payload: object) -> None:
-        """记录未识别更新痕迹；便于后续审计其他池是否仍有漏网类型。"""
+        """记录未识别更新痕迹；便于后续审计 `other` 池是否仍有漏网类型。"""
 
         existing = self.request_scope.final_metadata.get("other_updates")
         items = list(existing) if isinstance(existing, list) else []
@@ -151,7 +163,13 @@ class SessionStateManager:
         self.request_scope.final_metadata["other_updates"] = items
 
     async def emit_progress(self, *, content: str, metadata: JSONMap) -> None:
-        """向请求级 on_progress 镜像进度；兼容旧 `tool_hint` 参数约定。"""
+        """向请求级 `on_progress` 镜像进度；兼容旧工具提示参数约定。
+
+        处理流程：
+            - 空内容或未注册回调时直接跳过
+            - 从 `metadata` 中提取兼容参数，优先保留旧工具提示行为
+            - 先走完整回调签名，若参数不兼容再回退到精简调用方式
+        """
 
         if not content or self.on_progress is None:
             return
@@ -179,12 +197,12 @@ class SessionStateManager:
         *,
         progress_router: ProgressRouter,
     ) -> None:
-        """接收一条 session_update 并委托 ProgressRouter 分派；manager 自己不再写大段 if/else。
+        """接收一条会话更新并委托 `ProgressRouter` 分派；管理器自身不再维护大段分支。
 
         处理流程：
-            - 若 state 已关闭，则上报 late update 并直接拒绝写入
-            - 绑定当前请求的 ProgressRouter，确保普通更新与权限分支共用同一出口
-            - 把 update 交给 router 做 handler 解析、池建立/复用、flush 与销毁
+            - 若状态已关闭，则上报迟到更新并直接拒绝写入
+            - 绑定当前请求的 `ProgressRouter`，确保普通更新与权限分支共用同一出口
+            - 把 update 交给 router 做 handler 解析、池建立或复用、刷新与销毁
         """
 
         if self._closed:
@@ -203,7 +221,13 @@ class SessionStateManager:
 
     @staticmethod
     def extract_media_path(block: ACPResourceBlock) -> str | None:
-        """从 ACP 内容块中提取本地媒体路径；兼容 uri/path/resource.uri 三种来源。"""
+        """从 ACP 内容块中提取本地媒体路径；兼容 `uri`、`path`、`resource.uri` 三种来源。
+
+        处理流程：
+            - 优先检查块对象上的 `uri` 与 `path`
+            - 命中 `file://` 前缀时裁掉协议头，统一返回本地路径
+            - 块本身没有路径时，继续检查嵌套 `resource` 对象
+        """
 
         for attr in ("uri", "path"):
             value = getattr(block, attr, None)
@@ -224,13 +248,13 @@ class SessionStateManager:
         options: list[ACPPermissionOption],
         tool_call: ACPToolCall | None = None,
     ) -> object:
-        """处理一条权限请求；等待 inbound reply 或超时后回传 ACP SDK 需要的响应对象。
+        """处理一条权限请求；等待入站回复或超时后回传 ACP SDK 需要的响应对象。
 
         处理流程：
-            - 关闭态直接拒绝，避免 late permission 污染已结束 request
-            - 创建 pending future，并把权限提示写入权限池镜像给 on_progress
-            - 等待用户回复；超时时只上报 observability，不改写 request 生命周期
-            - 清理 pending 状态并把用户选择转成 ACP SDK 的 RequestPermissionResponse
+            - 关闭态直接拒绝，避免 late permission 污染已结束请求
+            - 创建 pending future，并把权限提示写入权限池镜像给 `on_progress`
+            - 等待用户回复；超时时只上报观测事件，不改写请求生命周期
+            - 清理 pending 状态，并把用户选择转换成 ACP SDK 需要的响应对象
         """
 
         if self._closed:
@@ -278,7 +302,7 @@ class SessionStateManager:
         )
 
     def has_pending_permission(self) -> bool:
-        """判断当前请求是否仍在等待权限回复；供 inbound 侧快速筛选目标 request。"""
+        """判断当前请求是否仍在等待权限回复；供入站侧快速筛选目标请求。"""
 
         return (
             self._pending_permission_future is not None
@@ -286,7 +310,7 @@ class SessionStateManager:
         )
 
     def looks_like_permission_reply(self, reply_text: str) -> bool:
-        """判断一条入站文本是否命中当前 pending permission；只做识别，不写状态。"""
+        """判断一条入站文本是否命中当前待回复权限；只做识别，不写状态。"""
 
         request = self._pending_permission_request
         if request is None:
@@ -301,7 +325,13 @@ class SessionStateManager:
         return self._select_permission_option(request.options, normalized) is not None
 
     async def handle_permission_reply(self, *, reply_text: str) -> str:
-        """消费权限回复并唤醒等待中的权限 future；未命中时只回提示文本与 observability。"""
+        """消费权限回复并唤醒等待中的 future；未命中时只返回提示文本与观测事件。
+
+        处理流程：
+            - 若当前没有待回复权限，则上报“未找到”事件并返回提示文本
+            - 去掉命令前缀后匹配选项编号、kind 或简写
+            - 命中时写回 future 结果，让权限等待分支继续向前执行
+        """
 
         future = self._pending_permission_future
         request = self._pending_permission_request
@@ -333,7 +363,13 @@ class SessionStateManager:
     def _select_permission_option(
         options: list[ACPPermissionOption], reply_text: str
     ) -> str | None:
-        """把用户回复映射到 ACP option_id；兼容编号、kind、allow/deny 等简写。"""
+        """把用户回复映射到 ACP `option_id`；兼容编号、类型值与 allow/deny 简写。
+
+        处理流程：
+            - 先尝试按数字编号映射选项
+            - 再按 `kind` 或 `option_id` 的字面量做直接匹配
+            - 最后处理 allow、deny、yes、no 等常见简写
+        """
 
         reply = reply_text.strip().lower()
         if not reply:
@@ -370,7 +406,13 @@ class SessionStateManager:
 
     @staticmethod
     def _render_permission_prompt(options: list[ACPPermissionOption]) -> str:
-        """把权限选项渲染成可回复的提示文本；供 on_progress 与直接回显复用。"""
+        """把权限选项渲染成可回复的提示文本；供进度镜像与直接回显复用。
+
+        处理流程：
+            - 先写入统一提示头，约束用户使用 `/permission <number>` 回复
+            - 逐个枚举选项，优先使用标签，其次回退到标题或 kind
+            - 返回换行拼接后的完整权限提示文案
+        """
         lines = ["ACP requires permission. Reply with /permission <number>:"]
         for index, option in enumerate(options, start=1):
             kind = getattr(
@@ -381,7 +423,7 @@ class SessionStateManager:
         return "\n".join(lines)
 
     def materialize_final_outbound(self, *, partial: bool = False) -> OutboundMessage:
-        """按 request-scope 聚合事实物化最终结果；partial 模式用于异常链路回退。"""
+        """按请求级聚合事实物化最终结果；`partial` 模式用于异常链路回退。"""
 
         content = self.request_scope.partial_text if partial else self.request_scope.final_text
         return OutboundMessage(
@@ -393,7 +435,13 @@ class SessionStateManager:
         )
 
     async def close(self) -> None:
-        """关闭当前请求 state；尾刷全部池、取消权限等待并阻止后续写入。"""
+        """关闭当前请求状态；尾刷全部池、取消权限等待并阻止后续写入。
+
+        处理流程：
+            - 先把状态标记为关闭，阻止 late update 再写入
+            - 若存在进度路由器，则执行统一 `close` 尾刷全部存活池
+            - 若仍有待回复权限 future，则显式取消，避免协程悬挂
+        """
 
         if self._closed:
             return

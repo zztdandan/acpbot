@@ -1,4 +1,4 @@
-"""plan handler：收口 plan 更新，维护计划摘要与结构化 final_metadata。"""
+"""计划处理器：收口计划更新，维护计划摘要与结构化最终元数据。"""
 
 from __future__ import annotations
 
@@ -23,23 +23,23 @@ class PlanUpdateHandler(StateUpdateHandler):
     bucket_type = ACPBucketType.PLAN
 
     def match(self, update: object) -> bool:
-        """只匹配 AgentPlanUpdate。"""
+        """只匹配 `AgentPlanUpdate`。"""
 
         return isinstance(update, AgentPlanUpdate)
 
     def create_pool(self, *, bucket_key: str) -> PlanPool:
-        """创建计划池；同一请求内仅保留一个当前计划快照。"""
+        """创建计划池；同一请求内只保留一个当前计划快照。"""
 
         return PlanPool(bucket_key=bucket_key)
 
     def build_bucket_key(self, update: object) -> str:
-        """使用固定 plan 键；每次更新覆盖整份计划快照。"""
+        """使用固定计划键；每次更新覆盖整份计划快照。"""
 
         del update
         return "plan"
 
     def consume(self, *, state_manager, update: object, pool) -> HandlerConsumeResult:
-        """写入计划摘要，并同步完整计划到 final_metadata。"""
+        """写入计划摘要，并同步完整计划到最终元数据。"""
 
         typed_update = cast(AgentPlanUpdate, update)
         summary = self._build_plan_summary(typed_update)
@@ -49,7 +49,7 @@ class PlanUpdateHandler(StateUpdateHandler):
 
     @staticmethod
     def _build_plan_summary(update: AgentPlanUpdate) -> str:
-        """把完整 plan 转成紧凑的可读摘要，便于 on_progress 镜像。"""
+        """把完整计划转成紧凑摘要，便于请求级进度镜像。"""
 
         lines = ["Plan updated:"]
         for index, entry in enumerate(list(getattr(update, "entries", []) or []), start=1):

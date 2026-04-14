@@ -1,4 +1,4 @@
-"""工具池实现：按 tool_call_id 粒度隔离工具进度，避免多工具共用单池。"""
+"""工具池实现：按 `tool_call_id` 粒度隔离工具进度，避免多工具共用单池。"""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from nanobot.acp.state.pools.base import ACPPoolBase
 
 
 class ToolPool(ACPPoolBase):
-    """工具池：记录单个工具调用的最新可见状态，并镜像为 tool progress。"""
+    """工具池：记录单个工具调用的最新可见状态，并镜像为工具进度片段。"""
 
     bucket_type = ACPBucketType.TOOL
 
@@ -28,7 +28,7 @@ class ToolPool(ACPPoolBase):
         self._dirty = True
 
     def flush(self) -> FlushResult | None:
-        """在工具状态有变化时输出一条 tool 进度镜像。"""
+        """在工具状态有变化时输出一条工具进度镜像。"""
 
         if not self._dirty or not self.latest_message:
             return None

@@ -1,4 +1,4 @@
-"""agent message 文本 handler：把普通文本流写入文本池并维护 final_text。"""
+"""消息文本处理器：把普通文本流写入文本池并维护最终文本快照。"""
 
 from __future__ import annotations
 
@@ -12,32 +12,32 @@ from nanobot.acp.state.pools import MessageTextPool
 
 
 class AgentMessageTextHandler(StateUpdateHandler):
-    """agent 文本更新处理器：收口 `agent_message_chunk/text` 到消息文本池。"""
+    """消息文本更新处理器：收口 `agent_message_chunk/text` 到消息文本池。"""
 
     name = "agent_message_text"
     update_type = ACPUpdateType.AGENT_MESSAGE_TEXT
     bucket_type = ACPBucketType.MESSAGE_TEXT
 
     def match(self, update: object) -> bool:
-        """只匹配文本内容块的 AgentMessageChunk。"""
+        """只匹配文本内容块的 `AgentMessageChunk`。"""
 
         return isinstance(update, AgentMessageChunk) and isinstance(
             update.content, TextContentBlock
         )
 
     def create_pool(self, *, bucket_key: str) -> MessageTextPool:
-        """创建普通文本池；同一请求内按文本流键复用。"""
+        """创建普通文本池；同一请求内按固定文本流键复用。"""
 
         return MessageTextPool(bucket_key=bucket_key)
 
     def build_bucket_key(self, update: object) -> str:
-        """使用固定文本流键；保持 final_text 聚合语义稳定。"""
+        """使用固定文本流键；保持最终文本聚合语义稳定。"""
 
         del update
         return "agent_message_text"
 
     def consume(self, *, state_manager, update: object, pool) -> HandlerConsumeResult:
-        """吸收文本块并刷新 final_text / partial_text。"""
+        """吸收文本块并刷新最终文本快照；供后续物化与异常回退共享。"""
 
         typed_update = cast(AgentMessageChunk, update)
         typed_pool = cast(MessageTextPool, pool)

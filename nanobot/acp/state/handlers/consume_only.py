@@ -1,4 +1,4 @@
-"""consume-only handler：处理已知但不需要独立 progress 的静态更新类型。"""
+"""静态事实处理器：处理已知但不需要独立进度镜像的更新类型。"""
 
 from __future__ import annotations
 
@@ -28,7 +28,12 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True, slots=True)
 class ConsumeOnlySpec:
-    """consume-only 规则描述：声明某种 update 的匹配类、池键与 final_metadata 键。"""
+    """静态事实规则：声明某种更新的匹配类、池键与最终元数据键。
+
+    职责：
+        - 把“某类更新应如何落池、写入哪个元数据键”集中配置化
+        - 让静态事实处理器复用同一套逻辑，避免为静态类型重复写类
+    """
 
     update_cls: type[object]
     update_type: ACPUpdateType
@@ -38,24 +43,24 @@ class ConsumeOnlySpec:
 
 
 class ConsumeOnlyUpdateHandler(StateUpdateHandler):
-    """通用消费型更新处理器：统一收口 usage/config/session_info 等静态回流。"""
+    """通用静态事实处理器：统一收口使用量、配置、会话信息等静态回流。"""
 
     bucket_type = ACPBucketType.CONSUME_ONLY
 
     def __init__(self, spec: ConsumeOnlySpec) -> None:
-        """绑定一条 consume-only 规则；一个规则对应一种已知 update 类型。"""
+        """绑定一条静态事实规则；一条规则对应一种已知更新类型。"""
 
         self.spec = spec
         self.name = spec.metadata_key
         self.update_type = spec.update_type
 
     def match(self, update: object) -> bool:
-        """按规则声明的 ACP schema 类做精准匹配。"""
+        """按规则声明的 ACP 模型类做精准匹配。"""
 
         return isinstance(update, self.spec.update_cls)
 
     def create_pool(self, *, bucket_key: str) -> ConsumeOnlyPool:
-        """创建消费池；是否一次性销毁由 spec 控制。"""
+        """创建消费池；是否一次性销毁由规则控制。"""
 
         return ConsumeOnlyPool(
             bucket_key=bucket_key,
@@ -75,7 +80,13 @@ class ConsumeOnlyUpdateHandler(StateUpdateHandler):
         update: object,
         pool,
     ) -> HandlerConsumeResult:
-        """记录静态更新事实；需要立刻销毁时由 router 收口 destroy。"""
+        """记录静态更新事实；需要立刻销毁时由路由器统一收口。
+
+        处理流程：
+            - 先把更新规整成可序列化载荷
+            - 写入消费池，保留最后一次静态事实
+            - 同步写入请求级最终元数据，并在终态时声明销毁池键
+        """
 
         payload = sanitize_json_value(update)
         pool.accept(payload)
@@ -87,7 +98,7 @@ class ConsumeOnlyUpdateHandler(StateUpdateHandler):
 
 
 def build_consume_only_handlers() -> list[ConsumeOnlyUpdateHandler]:
-    """构造所有已知 consume-only handler；避免 manager 中出现大段 if/else。"""
+    """构造全部静态事实处理器；避免管理器中出现大段类型分支。"""
 
     specs = [
         ConsumeOnlySpec(

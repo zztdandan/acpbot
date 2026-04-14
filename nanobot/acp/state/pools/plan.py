@@ -1,4 +1,4 @@
-"""计划池实现：聚合 plan 更新并生成可读的计划摘要文本。"""
+"""计划池实现：聚合计划更新并生成可读的计划摘要文本。"""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from nanobot.acp.state.pools.base import ACPPoolBase
 
 
 class PlanPool(ACPPoolBase):
-    """计划池：保存当前 plan 的完整快照，并在变更时输出摘要。"""
+    """计划池：保存当前计划的完整快照，并在变更时输出摘要。"""
 
     bucket_type = ACPBucketType.PLAN
 
@@ -27,7 +27,7 @@ class PlanPool(ACPPoolBase):
         self.summary = summary
 
     def flush(self) -> FlushResult | None:
-        """在计划摘要变化时输出一条 plan progress。"""
+        """在计划摘要变化时输出一条计划进度镜像。"""
 
         if not self.summary or self.summary == self._last_flushed_summary:
             return None

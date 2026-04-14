@@ -1,4 +1,4 @@
-"""state 池实现导出：集中暴露统一基类与具体池类型。"""
+"""状态池导出：集中暴露统一基类与具体池类型。"""
 
 from __future__ import annotations
 

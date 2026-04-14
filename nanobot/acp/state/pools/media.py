@@ -7,12 +7,12 @@ from nanobot.acp.state.pools.base import ACPPoolBase
 
 
 class MediaPool(ACPPoolBase):
-    """媒体池：收集单请求内已产生的媒体路径，并支持按新增路径 flush。"""
+    """媒体池：收集单请求内已产生的媒体路径，并支持按新增路径刷新。"""
 
     bucket_type = ACPBucketType.MEDIA
 
     def __init__(self, *, bucket_key: str) -> None:
-        """建立媒体池；bucket_key 用于区分不同来源的媒体流。"""
+        """建立媒体池；池键用于区分不同来源的媒体流。"""
 
         super().__init__(bucket_key=bucket_key)
         self.media_paths: list[str] = []
@@ -26,7 +26,7 @@ class MediaPool(ACPPoolBase):
             self.media_paths.append(path)
 
     def flush(self) -> FlushResult | None:
-        """返回自上次 flush 后新增的媒体路径列表。"""
+        """返回自上次刷新后新增的媒体路径列表。"""
 
         if len(self.media_paths) <= self._last_flushed_count:
             return None

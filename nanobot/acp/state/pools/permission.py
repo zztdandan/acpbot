@@ -28,7 +28,7 @@ class PermissionPool(ACPPoolBase):
         self._dirty = True
 
     def flush(self) -> FlushResult | None:
-        """在权限提示有更新时输出一条 permission progress。"""
+        """在权限提示有更新时输出一条权限进度镜像。"""
 
         if not self._dirty or not self.prompt:
             return None

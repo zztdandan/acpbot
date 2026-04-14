@@ -1,4 +1,4 @@
-"""state 包导出：暴露请求级状态管理器、路由器与基础模型。"""
+"""状态包导出：集中暴露请求级状态归属对象与基础模型。"""
 
 from __future__ import annotations
 
@@ -16,10 +16,10 @@ from nanobot.acp.state.router import HandlerRegistry, ProgressRouter
 
 
 class _ACPDispatchError(RuntimeError):
-    """ACP dispatch 异常：在执行链路需要保留 partial fallback 时向上游传递信号。"""
+    """ACP 分发异常：在执行失败但仍需保留部分回退结果时向上游传递信号。"""
 
     def __init__(self, partial_response: str = "") -> None:
-        """记录 partial_response；供 ProcessRuntimeManager 在失败链路判断是否物化 partial final。"""
+        """记录部分响应文本；供流程管理器决定是否物化部分结果。"""
         super().__init__("ACP dispatch failed")
         self.partial_response = partial_response
 

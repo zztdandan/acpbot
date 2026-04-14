@@ -1,4 +1,4 @@
-"""工具 handler：按 tool_call_id 粒度隔离工具开始与进度更新。"""
+"""工具处理器：按 `tool_call_id` 粒度隔离工具开始与进度更新。"""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from nanobot.acp.state.pools import ToolPool
 
 
 class ToolUpdateHandler(StateUpdateHandler):
-    """工具更新处理器：处理 `tool_call` 与 `tool_call_update` 两种工具事件。"""
+    """工具更新处理器：处理工具启动与工具进度两类事件。"""
 
     name = "tool_update"
     update_type = ACPUpdateType.TOOL_PROGRESS
@@ -24,7 +24,7 @@ class ToolUpdateHandler(StateUpdateHandler):
         return isinstance(update, ToolCallStart | ToolCallProgress)
 
     def create_pool(self, *, bucket_key: str) -> ToolPool:
-        """创建工具池；每个 tool_call_id 拥有独立实例。"""
+        """创建工具池；每个 `tool_call_id` 拥有独立实例。"""
 
         return ToolPool(bucket_key=bucket_key)
 
@@ -46,7 +46,7 @@ class ToolUpdateHandler(StateUpdateHandler):
 
     @staticmethod
     def _render_tool_message(update: ToolCallStart | ToolCallProgress) -> str:
-        """把 ACP 工具更新规整成统一可读文本；优先使用 title/message/status。"""
+        """把 ACP 工具更新规整成统一可读文本；优先使用标题、消息和状态。"""
 
         if isinstance(update, ToolCallStart):
             tool_name = str(
@@ -70,7 +70,7 @@ class ToolUpdateHandler(StateUpdateHandler):
         *,
         state_manager,
     ) -> list[str]:
-        """从工具内容块中提取媒体路径；只采纳真正的内容附件，忽略 terminal/diff 等过程态。"""
+        """从工具内容块中提取媒体路径；只采纳真正的内容附件，忽略过程态片段。"""
 
         media_paths: list[str] = []
         for content in list(getattr(update, "content", None) or []):
