@@ -1,8 +1,4 @@
-"""会话能力缓存 owner：封装模型/代理目录与当前选择。
-
-本模块统一承载 `_SessionCapabilities` 的数据、行为与 ACP payload 解析逻辑，
-避免 runtime_manager 再维护一层纯转发方法。
-"""
+"""会话能力缓存：模型/代理目录与当前选择。"""
 
 from __future__ import annotations
 
@@ -121,28 +117,7 @@ def build_session_capabilities_from_payload(payload: ACPSessionPayload) -> _Sess
 
 
 def _pick(obj: ACPSessionPayload, *names: str) -> ACPSessionPayload:
-    """从对象中按候选字段名顺序获取属性值。
-
-    参数：
-        obj: 要查找的对象（通常是 Pydantic model 或 dict）
-        *names: 候选字段名列表（按优先级排序）
-
-    返回：
-        ACPSessionPayload: 第一个存在的属性值，如果都不存在则返回 None
-
-    使用场景：
-        - 兼容不同 SDK 版本的字段命名
-        - 支持 snake_case 和 camelCase 两种风格
-
-    示例：
-        # SDK v1 使用 snake_case
-        value = _pick(payload, "current_model_id", "currentModelId")
-        # SDK v2 使用 camelCase
-        value = _pick(payload, "currentModelId", "current_model_id")
-
-    注意：
-        此函数是私有的（_ 前缀），仅在本模块内部使用。
-    """
+    """按候选字段名顺序获取属性值（兼容不同 SDK 版本的字段命名）。"""
 
     for name in names:
         if hasattr(obj, name):

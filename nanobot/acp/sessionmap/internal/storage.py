@@ -1,28 +1,4 @@
-"""SessionMap 存储工具：JSON 文件的读取与原子写入。
-
-本模块提供了 session_map.json 文件的读写操作，包括：
-    1. read_sessionmap_payload: 读取并验证 JSON 文件
-    2. write_sessionmap_payload: 原子写入 JSON 文件（先写临时文件再 rename）
-
-存储格式（session_map.json）：
-    {
-      "version": 2,
-      "mappings": [
-        {
-          "cwd": "/path/to/workspace",
-          "nanobotSideSessionKey": "user123:chat456",
-          "acpSideSessionId": "abc123",
-          "updatedAt": "2026-04-13T10:00:00+08:00",
-          "revision": 1
-        }
-      ]
-    }
-
-设计原则：
-    - 原子写入：通过 temp + rename 避免写坏文件
-    - 工作区隔离：写入时保留其他 cwd 的绑定
-    - 版本控制：强制要求 schema version = 2
-"""
+"""SessionMap 存储工具：JSON 文件的读取与原子写入。"""
 
 from __future__ import annotations
 
@@ -36,33 +12,12 @@ from nanobot.acp.sessionmap.models import SessionMapBindingEntry
 def read_sessionmap_payload(map_file: Path) -> JSONMap:
     """从磁盘读取 session_map.json 并验证格式。
 
-    参数：
-        map_file: JSON 文件路径（如 ~/.local/share/nanobot/acp/session_map.json）
-
-    返回：
-        JSONMap: 解析后的字典（包含 version 和 mappings 字段）
-
     处理流程：
-        1. 如果文件不存在：返回空结构（version=2, mappings=[]）
-        2. 读取文件内容并解析为 JSON
-        3. 验证必须是 dict 类型
-        4. 验证 version 必须是 2
-        5. 验证 mappings 必须是 list 类型
-        6. 返回解析后的 payload
+        1. 文件不存在则返回空结构
+        2. 解析 JSON 并验证：必须是 dict，version=2，mappings 是 list
 
     异常：
-        ValueError: 文件格式不正确时抛出
-            - payload 不是 dict
-            - version 不是 2
-            - mappings 不是 list
-
-    使用场景：
-        - binding_manager._load_entries_from_disk 中调用
-        - write_sessionmap_payload 中读取现有数据
-
-    注意：
-        此函数不解析 mappings 中的具体条目（由 _parse_entry 处理）。
-        文件不存在时返回空结构（不抛出异常）。
+        ValueError: 格式不正确时抛出（不是 dict / version 不是 2 / mappings 不是 list）
     """
 
     # 文件不存在时返回空结构（首次使用）
@@ -96,37 +51,11 @@ def write_sessionmap_payload(
 ) -> None:
     """原子写入 session_map.json（保留其他 cwd 的绑定）。
 
-    参数：
-        map_file: JSON 文件路径
-        current_cwd: 当前工作目录（用于工作区隔离）
-        entries: 当前 cwd 的绑定条目字典
-            key: nanobot_side_session_key
-            value: SessionMapBindingEntry
-
     处理流程：
-        1. 读取现有文件（如果存在）
-        2. 从 mappings 中保留其他 cwd 的绑定（preserved）
-        3. 将当前 cwd 的新绑定序列化为 payload
-        4. 合并：preserved + current
-        5. 原子写入：先写 .tmp 文件，再 rename
-
-    原子写入策略：
-        1. 写入 session_map.json.tmp
-        2. 调用 tmp_path.replace(map_file)
-        3. replace 是原子操作（POSIX rename）
-
-    工作区隔离：
-        - 只替换 current_cwd 的绑定
-        - 保留其他 cwd 的绑定不变
-        - 保证多工作区场景下的数据安全
-
-    使用场景：
-        - binding_manager.persist 中调用
-        - bind_session / clear_binding 后持久化
-
-    注意：
-        此函数是同步的（阻塞 IO）。
-        文件目录不存在时会自动创建（mkdir -p）。
+        1. 读取现有文件（存在时）
+        2. 保留非当前 cwd 的绑定（工作区隔离）
+        3. 合并：preserved + 当前 cwd 的新绑定
+        4. 原子写入：先写 .tmp 文件再 rename
     """
 
     # 步骤 1: 读取现有文件（如果存在）

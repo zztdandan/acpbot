@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from loguru import logger
@@ -45,11 +44,7 @@ async def ensure_connection(runtime: ACPRuntime) -> None:
             return
         runtime.acp_callback_client = _NanobotACPClient(runtime)
         env = {**os.environ, **runtime.acp_config.env}
-        cwd = (
-            Path(runtime.acp_config.cwd).expanduser()
-            if runtime.acp_config.cwd
-            else runtime.workspace
-        )
+        cwd = runtime.resolve_acp_workspace_path()
         timeout = max(1, runtime.acp_config.startup_timeout_seconds)
         runtime._acp_client_connection_cm = _acp_spawn_agent_process()(
             runtime.acp_callback_client,

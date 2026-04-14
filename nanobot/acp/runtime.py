@@ -1,24 +1,4 @@
-"""ACP 运行时核心引擎。
-
-本模块是 ACP（Agent Communication Protocol）运行时的大脑，负责：
-1. 连接管理：与 ACP Agent 进程建立/维护/重置连接
-2. 请求编排：处理直接请求（process_direct）和总线入站请求（dispatch_inbound）
-3. 等待链：为每个请求注册等待条目，异步等待最终响应
-4. 会话映射：维护 nanobot 侧会话键与 ACP 侧会话 ID 的绑定关系
-5. 权限决策：根据策略（STRICT/TRUSTED/DEFAULT）自动响应权限请求
-6. 可观测性：上报结构化观测事件（错误/状态变更/生命周期事件）
-
-架构位置：
-    ACPRuntime 位于 nanobot 总线与 ACP 协议层之间：
-    - 下行：接收 InboundMessage，委托给 ACP Agent 处理
-    - 上行：接收 ACP callback，发布 OutboundMessage 到总线
-    - 侧行：管理 sessionmap binding、process runtime state、observability
-
-关键设计模式：
-    - Request-Response 异步等待：每个请求生成唯一 request_key，注册 Future 等待结果
-    - 连接单例：整个运行时共享一个 ACP 连接（通过 ensure_connection 保证）
-    - 管理器分层：将职责拆分为多个 Manager（sessionmap/process/inbound/observability）
-"""
+"""ACP 运行时核心引擎：连接管理、请求编排、等待链、会话映射、权限决策、可观测性。"""
 
 from __future__ import annotations
 
@@ -70,26 +50,7 @@ else:
 
 
 class ACPRuntime:
-    """ACP 运行时主引擎：编排连接、请求、会话与可观测性。
-
-    核心职责：
-        1. 连接生命周期：管理 ACP Client 连接的建立、重置、关闭
-        2. 请求等待链：为每个请求注册 Future，异步等待最终响应
-        3. 入站路由：将 InboundMessage 委托给 inbound_manager 处理
-        4. 会话绑定：维护 nanobot 侧会话键与 ACP 侧会话 ID 的映射
-        5. 权限决策：根据配置策略自动响应 ACP 权限请求
-        6. 观测事件：上报结构化事件到 observability_manager
-
-    线程安全：
-        - _acp_connection_lock: 保证并发请求不会同时重建连接
-        - _wait_by_request_key: dict 操作在单线程 asyncio 中安全（无锁）
-
-    使用示例：
-        runtime = ACPRuntime(bus=bus, workspace=Path("."), acp_config=acp_config)
-        await runtime.run()  # 启动入站消费循环
-        result = await runtime.process_direct("Hello")  # 发送直接请求
-    """
-
+    """ACP 运行时主引擎：编排连接、请求、会话与可观测性，通过 _acp_connection_lock 保护并发。"""
     def __init__(
         self,
         *,
@@ -102,7 +63,7 @@ class ACPRuntime:
 
         参数：
             bus: 消息总线实例（用于 inbound/outbound 消息路由）
-            workspace: 工作区路径（ACP Agent 进程的工作目录）
+            workspace: nanobot runtime 工作区路径（ACP cwd 的兜底来源）
             acp_config: ACP 后端配置（心跳、权限策略、启动超时等）
             channels_config: 频道配置（可选，用于 channel 路由）
 
@@ -130,6 +91,7 @@ class ACPRuntime:
         # ===== 基础配置 =====
         self.bus = bus
         self.workspace = workspace
+        # 说明：ACP backend 的标准工作目录优先取 acp_config.cwd；workspace 仅作兼容兜底。
         self.acp_config = acp_config
         self.channels_config = channels_config
 
@@ -169,6 +131,19 @@ class ACPRuntime:
 
         self.inbound_manager = InboundManager(runtime=self)
         # 入站处理：处理 process_direct 和 dispatch_inbound 请求
+
+    def resolve_acp_workspace_path(self) -> Path:
+        """返回 ACP backend 统一工作目录。
+
+        设计约束：
+            - `acp_config.cwd` 是 ACP workspace 的单一配置入口
+            - nanobot/acp 其他子模块不得再各自解析 `acp_config.cwd`
+            - 当 `acp_config.cwd` 未显式配置时，退回 runtime.workspace 作为兼容兜底
+        """
+
+        if self.acp_config.cwd:
+            return Path(self.acp_config.cwd).expanduser().resolve()
+        return self.workspace.resolve()
 
     def new_request_key(self) -> str:
         """生成全局唯一的请求标识符。

@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -32,7 +31,14 @@ class SessionRuntimeManager:
         runtime: ACPRuntime,
         binding_manager: SessionMapBindingManager,
     ) -> None:
-        """初始化运行时会话管理器。"""
+        """初始化运行时会话管理器。
+
+        使用示例：
+            runtime_manager = SessionRuntimeManager(
+                runtime=runtime,
+                binding_manager=binding_manager,
+            )
+        """
         self._runtime = runtime
         self._binding_manager = binding_manager
         self._lock = asyncio.Lock()
@@ -51,7 +57,13 @@ class SessionRuntimeManager:
         return self._by_acp_side_session_id.get(acp_side_session_id)
 
     def get_session_capabilities(self, acp_side_session_id: str) -> _SessionCapabilities | None:
-        """获取会话的能力缓存对象，不存在返回 None。"""
+        """获取会话的能力缓存对象，不存在返回 None。
+
+        使用示例：
+            caps = runtime_manager.get_session_capabilities("abc123")
+            if caps:
+                print(f"当前模型: {caps.current_model}")
+        """
         entry = self._by_acp_side_session_id.get(acp_side_session_id)
         return entry.capabilities if entry is not None else None
 
@@ -219,12 +231,7 @@ class SessionRuntimeManager:
         if conn is None:
             raise RuntimeError("ACP connection is not available")
 
-        cwd = (
-            Path(self._runtime.acp_config.cwd).expanduser()
-            if self._runtime.acp_config.cwd
-            else self._runtime.workspace
-        )
-        resolved_cwd = str(cwd.resolve())
+        resolved_cwd = str(self._runtime.resolve_acp_workspace_path())
 
         if not hasattr(conn, "resume_session") and not hasattr(conn, "load_session"):
             return True, None
@@ -273,12 +280,7 @@ class SessionRuntimeManager:
     ) -> str:
         """创建新 ACP 会话并完成 runtime entry / binding / selection 一次性收口。"""
 
-        cwd = (
-            Path(self._runtime.acp_config.cwd).expanduser()
-            if self._runtime.acp_config.cwd
-            else self._runtime.workspace
-        )
-        response = await conn.new_session(cwd=str(cwd.resolve()))
+        response = await conn.new_session(cwd=str(self._runtime.resolve_acp_workspace_path()))
         acp_side_session_id = response.session_id
         self._store_runtime_entry(
             nanobot_side_session_key=nanobot_side_session_key,

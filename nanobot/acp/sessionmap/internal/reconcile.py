@@ -15,6 +15,10 @@ def extract_acp_side_session_ids(payload: ACPSessionPayload) -> set[str]:
         2. dict -> 检查 session_id/sessionId/id 键，递归遍历 values
         3. list/tuple/set -> 遍历每个元素
         4. 普通对象 -> 检查 session_id/sessionId/id 属性，递归遍历 sessions/data/items
+
+    使用示例：
+        payload = {"sessions": [{"session_id": "abc123"}, {"sessionId": "def456"}]}
+        ids = extract_acp_side_session_ids(payload)
     """
     ids: set[str] = set()
 
@@ -107,18 +111,6 @@ async def fetch_acp_side_session_ids(conn: object, *, cwd: str) -> tuple[set[str
         如果第一次调用（带 cwd）失败或返回空结果：
         - 回退到无 cwd 调用（_collect(None)）
         - 如果回退成功，仍然返回成功标志
-
-    使用场景：
-        - sessionmap 启动时的大对账（reconcile）
-        - 持久化真相加载（load_persistent_truth）
-        - 会话绑定验证（确保本地映射与 ACP 侧一致）
-
-    示例：
-        session_ids, success = await fetch_acp_side_session_ids(conn, cwd="/path/to/workspace")
-        if success:
-            print(f"成功获取 {len(session_ids)} 个会话 ID")
-        else:
-            print("获取失败（可能是连接问题或 ACP 不支持 list_sessions）")
     """
     # 检查 conn 是否有 list_sessions 方法
     list_sessions = cast(

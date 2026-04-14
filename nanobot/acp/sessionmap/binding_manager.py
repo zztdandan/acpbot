@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from nanobot.acp.sessionmap.internal.reconcile import fetch_acp_side_session_ids
@@ -56,15 +55,6 @@ class SessionMapBindingManager:
 
         return self._bootstrapped
 
-    def _resolved_acp_cwd(self) -> str:
-        """解析 ACP 工作目录：acp_config.cwd 优先，否则 owner.workspace，展开为绝对路径。"""
-        cwd = (
-            Path(self._owner.acp_config.cwd).expanduser()
-            if self._owner.acp_config.cwd
-            else self._owner.workspace
-        )
-        return str(cwd.resolve())
-
     @staticmethod
     def _parse_entry(raw: object) -> SessionMapBindingEntry:
         """从 JSON 字典解析绑定条目。验证必填字段（cwd/key/acp_id/updatedAt/revision）。
@@ -107,7 +97,7 @@ class SessionMapBindingManager:
     def _load_entries_from_disk(self) -> dict[str, SessionMapBindingEntry]:
         """读取磁盘 JSON，只返回当前 cwd 的条目（工作区隔离）。"""
         payload = read_sessionmap_payload(self._session_map_file)
-        current_cwd = self._resolved_acp_cwd()
+        current_cwd = str(self._owner.resolve_acp_workspace_path())
         loaded: dict[str, SessionMapBindingEntry] = {}
         raw_mappings = payload.get("mappings")
         mappings = raw_mappings if isinstance(raw_mappings, list) else []
@@ -123,7 +113,7 @@ class SessionMapBindingManager:
         """原子写磁盘：保留其他 cwd 绑定，替换当前 cwd 绑定。"""
         write_sessionmap_payload(
             self._session_map_file,
-            current_cwd=self._resolved_acp_cwd(),
+            current_cwd=str(self._owner.resolve_acp_workspace_path()),
             entries=self._entries,
         )
 
@@ -156,8 +146,11 @@ class SessionMapBindingManager:
             1. 清理冲突：如果 acp_id 已绑到其他 nanobot_key，删除旧绑定
             2. 新建绑定（revision=1），或更新已有绑定（revision+1）
             3. acp_id 未变时幂等返回
+
+        使用示例：
+            binding_manager.bind_session("user123:chat456", "abc123")
         """
-        current_cwd = self._resolved_acp_cwd()
+        current_cwd = str(self._owner.resolve_acp_workspace_path())
         now = _now_iso_with_tz()
 
         # 清理冲突绑定（保证 acp_side_session_id 唯一性）
@@ -259,7 +252,7 @@ class SessionMapBindingManager:
             return
 
         listed_ids, authoritative = await fetch_acp_side_session_ids(
-            conn, cwd=self._resolved_acp_cwd()
+            conn, cwd=str(self._owner.resolve_acp_workspace_path())
         )
 
         if not authoritative or not listed_ids:
