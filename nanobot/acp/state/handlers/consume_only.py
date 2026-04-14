@@ -19,7 +19,7 @@ from nanobot.acp.state.handlers.base import (
     StateUpdateHandler,
     sanitize_json_value,
 )
-from nanobot.acp.state.models import ACPBucketType, ACPUpdateType, PoolKey
+from nanobot.acp.state.models import ACPBucketType, ACPUpdateType
 from nanobot.acp.state.pools import ConsumeOnlyPool
 
 if TYPE_CHECKING:
@@ -91,10 +91,7 @@ class ConsumeOnlyUpdateHandler(StateUpdateHandler):
         payload = sanitize_json_value(update)
         pool.accept(payload)
         state_manager.update_named_metadata(self.spec.metadata_key, payload)
-        destroy_pool_keys: list[PoolKey] = []
-        if pool.is_terminal():
-            destroy_pool_keys.append(self.build_pool_key(update))
-        return HandlerConsumeResult(destroy_pool_keys=destroy_pool_keys)
+        return HandlerConsumeResult(immediate_finalize=pool.is_terminal())
 
 
 def build_consume_only_handlers() -> list[ConsumeOnlyUpdateHandler]:

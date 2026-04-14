@@ -1,4 +1,4 @@
-"""消息文本处理器：把普通文本流写入文本池并维护最终文本快照。"""
+"""消息文本处理器：把普通文本流写入文本池，并把 final 提交延后到 flush。"""
 
 from __future__ import annotations
 
@@ -37,11 +37,20 @@ class AgentMessageTextHandler(StateUpdateHandler):
         return "agent_message_text"
 
     def consume(self, *, state_manager, update: object, pool) -> HandlerConsumeResult:
-        """吸收文本块并刷新最终文本快照；供后续物化与异常回退共享。"""
+        """吸收文本块并刷新 partial 快照；最终文本只在 flush 时提交。"""
 
         typed_update = cast(AgentMessageChunk, update)
         typed_pool = cast(MessageTextPool, pool)
         text = str(getattr(typed_update.content, "text", "") or "")
         typed_pool.accept(text)
-        state_manager.update_text_snapshot(typed_pool.text)
-        return HandlerConsumeResult(flush_results=[typed_pool.flush()])
+        state_manager.update_partial_text(typed_pool.text)
+        return HandlerConsumeResult()
+
+    def build_progress_outbound(self, *, state_manager, flush_result):
+        """在文本池 flush 时统一提交 final 文本，再走标准 progress outbound 编制。"""
+
+        state_manager.commit_final_text(flush_result.content)
+        return super().build_progress_outbound(
+            state_manager=state_manager,
+            flush_result=flush_result,
+        )

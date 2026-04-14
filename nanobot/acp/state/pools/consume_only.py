@@ -19,13 +19,14 @@ class ConsumeOnlyPool(ACPPoolBase):
         self.accept_count = 0
         self.last_payload: object | None = None
 
-    def _accept(self, payload: object) -> None:
+    def _accept(self, payload: object) -> bool:
         """记录最后一次输入；仅做事实保留，不生成进度片段。"""
 
         self.accept_count += 1
         self.last_payload = payload
         if self.destroy_after_accept:
             self.mark_terminal()
+        return True
 
     def flush(self) -> FlushResult | None:
         """消费池不会产生外部可见进度。"""

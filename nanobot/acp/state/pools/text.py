@@ -32,21 +32,24 @@ class _TextStreamPool(ACPPoolBase):
         self.text = ""
         self._last_flushed_text = ""
 
-    def _accept(self, payload: object) -> None:
+    def _accept(self, payload: object) -> bool:
         """吸收新的文本块；兼容整段覆盖、尾部重复与纯增量三种常见流式形态。"""
 
         chunk = str(payload or "")
         if not chunk:
-            return
+            return False
         if not self.text:
             self.text = chunk
-            return
+            return True
         if chunk.startswith(self.text):
+            if chunk == self.text:
+                return False
             self.text = chunk
-            return
+            return True
         if self.text.endswith(chunk):
-            return
+            return False
         self.text += chunk
+        return True
 
     def flush(self) -> FlushResult | None:
         """返回尚未镜像的文本快照；无新增时保持静默。"""
@@ -65,6 +68,7 @@ class MessageTextPool(_TextStreamPool):
     """普通文本池：聚合消息正文文本并对外镜像为标准文本片段。"""
 
     bucket_type = ACPBucketType.MESSAGE_TEXT
+    idle_timeout_seconds: float | None = 0.5
 
     def __init__(self, *, bucket_key: str) -> None:
         """建立普通文本池；适用于 `agent_message_chunk/text`。"""
@@ -76,6 +80,7 @@ class ThoughtPool(_TextStreamPool):
     """思考文本池：聚合思考文本，并通过元数据标记思考语义。"""
 
     bucket_type = ACPBucketType.THOUGHT
+    idle_timeout_seconds: float | None = 0.8
 
     def __init__(self, *, bucket_key: str) -> None:
         """建立思考池；供思考处理器独立收口。"""

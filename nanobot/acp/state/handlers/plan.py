@@ -45,7 +45,7 @@ class PlanUpdateHandler(StateUpdateHandler):
         summary = self._build_plan_summary(typed_update)
         pool.accept(summary)
         state_manager.update_named_metadata("plan", sanitize_json_value(typed_update))
-        return HandlerConsumeResult(flush_results=[pool.flush()])
+        return HandlerConsumeResult()
 
     @staticmethod
     def _build_plan_summary(update: AgentPlanUpdate) -> str:

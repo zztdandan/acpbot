@@ -1,58 +1,47 @@
-"""池抽象基类：统一封装接收、刷新、关闭与终态约束。"""
+"""池抽象基类：统一封装接收、死手刷新与终态约束。"""
 
 from __future__ import annotations
 
+import time
 from abc import ABC, abstractmethod
 
 from nanobot.acp.state.models import ACPBucketType, FlushResult
 
 
 class ACPPoolBase(ABC):
-    """单请求池基类：为状态域内所有池提供统一生命周期与终态控制。
-
-    职责：
-        - 封装关闭态与终态判断，避免各池重复实现相同边界逻辑
-        - 要求子类只关注自身语义相关的接收与刷新实现
-    """
+    """单请求池基类：池自己维护死手时间，router 只负责调度 timeout handle。"""
 
     bucket_type: ACPBucketType
+    idle_timeout_seconds: float | None = None
 
     def __init__(self, *, bucket_key: str) -> None:
-        """初始化池实例并记录索引键；同一请求内由状态管理器统一持有。"""
-
         self.bucket_key = bucket_key
-        self._closed = False
         self._terminal = False
+        self.deadline_monotonic: float | None = None
 
     def accept(self, payload: object) -> None:
-        """接收一条输入；关闭后的池不再接受写入。"""
-
-        if self._closed:
+        if self._terminal:
             return
-        self._accept(payload)
+        consumed = self._accept(payload)
+        if consumed:
+            self._refresh_deadline()
 
     @abstractmethod
-    def _accept(self, payload: object) -> None:
-        """处理单条输入并更新池内事实；子类只关注自身语义。"""
+    def _accept(self, payload: object) -> bool:
+        """处理单条输入并更新池内事实；返回是否实际消费该输入。"""
 
     @abstractmethod
     def flush(self) -> FlushResult | None:
-        """提取当前可镜像片段；返回空值表示本次没有外部可见增量。"""
-
-    def close(self) -> FlushResult | None:
-        """关闭池并输出尾部增量；供请求关闭链路做统一收尾。"""
-
-        if self._closed:
-            return None
-        self._closed = True
-        return self.flush()
+        """提取当前可发布片段；返回空值表示当前没有可见增量。"""
 
     def is_terminal(self) -> bool:
-        """返回池是否进入终态；终态池会被管理器从索引中销毁。"""
-
-        return self._terminal or self._closed
+        return self._terminal
 
     def mark_terminal(self) -> None:
-        """把池标记为终态；适用于一次性消费池与 `other` 池。"""
-
         self._terminal = True
+
+    def _refresh_deadline(self) -> None:
+        if self.idle_timeout_seconds is None:
+            self.deadline_monotonic = None
+            return
+        self.deadline_monotonic = time.monotonic() + self.idle_timeout_seconds

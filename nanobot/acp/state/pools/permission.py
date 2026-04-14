@@ -10,6 +10,7 @@ class PermissionPool(ACPPoolBase):
     """权限池：承载当前请求内尚未完成的权限提示。"""
 
     bucket_type = ACPBucketType.PERMISSION
+    idle_timeout_seconds: float | None = 300.0
 
     def __init__(self, *, bucket_key: str) -> None:
         """建立权限池；同一请求通常只保留一个活跃权限池。"""
@@ -18,14 +19,17 @@ class PermissionPool(ACPPoolBase):
         self.prompt = ""
         self._dirty = False
 
-    def _accept(self, payload: object) -> None:
+    def _accept(self, payload: object) -> bool:
         """更新当前权限提示文本；仅保留最近一次提示。"""
 
         prompt = str(payload or "").strip()
         if not prompt:
-            return
+            return False
+        if prompt == self.prompt:
+            return False
         self.prompt = prompt
         self._dirty = True
+        return True
 
     def flush(self) -> FlushResult | None:
         """在权限提示有更新时输出一条权限进度镜像。"""

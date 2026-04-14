@@ -10,6 +10,7 @@ class PlanPool(ACPPoolBase):
     """计划池：保存当前计划的完整快照，并在变更时输出摘要。"""
 
     bucket_type = ACPBucketType.PLAN
+    idle_timeout_seconds: float | None = 0.8
 
     def __init__(self, *, bucket_key: str) -> None:
         """建立计划池；一个请求内通常只需一个当前计划快照。"""
@@ -18,13 +19,16 @@ class PlanPool(ACPPoolBase):
         self.summary = ""
         self._last_flushed_summary = ""
 
-    def _accept(self, payload: object) -> None:
+    def _accept(self, payload: object) -> bool:
         """接收计划摘要文本；最新摘要会覆盖旧内容。"""
 
         summary = str(payload or "").strip()
         if not summary:
-            return
+            return False
+        if summary == self.summary:
+            return False
         self.summary = summary
+        return True
 
     def flush(self) -> FlushResult | None:
         """在计划摘要变化时输出一条计划进度镜像。"""

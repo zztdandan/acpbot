@@ -1,4 +1,4 @@
-"""消息媒体处理器：提取媒体路径并写入媒体池与请求级聚合结果。"""
+"""消息媒体处理器：把三类 ACP 媒体块统一落成 resource-link 风格的本地资源。"""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from acp.schema import (
 )
 
 from nanobot.acp.state.handlers.base import HandlerConsumeResult, StateUpdateHandler
+from nanobot.acp.state.handlers.media_resource import MediaResourceResolver
 from nanobot.acp.state.models import ACPBucketType, ACPUpdateType
 from nanobot.acp.state.pools import MediaPool
 
@@ -43,12 +44,18 @@ class AgentMessageMediaHandler(StateUpdateHandler):
         return "agent_message_media"
 
     def consume(self, *, state_manager, update: object, pool) -> HandlerConsumeResult:
-        """提取媒体路径并写入池与最终媒体列表；缺少有效路径时保持静默。"""
+        """把消息媒体块归一化为本地 resource-link，并写入池与请求聚合结果。"""
 
         typed_update = cast(AgentMessageChunk, update)
-        media_path = state_manager.extract_media_path(typed_update.content)
-        if not media_path:
-            return HandlerConsumeResult()
-        pool.accept(media_path)
-        state_manager.append_media_path(media_path, source="message")
-        return HandlerConsumeResult(flush_results=[pool.flush()])
+        resource = self._media_resolver_for(state_manager).resolve(typed_update.content)
+        if resource is None:
+            # 解析失败时立即结束当前媒体池，避免创建后无 deadline 的空池残留。
+            return HandlerConsumeResult(immediate_finalize=True)
+        pool.accept(resource)
+        state_manager.append_media_path(resource.local_path)
+        return HandlerConsumeResult()
+
+    def _media_resolver_for(self, state_manager) -> MediaResourceResolver:
+        """为当前请求构造媒体解析器；落地目录由 handler 自己归属，不再挂在 manager。"""
+
+        return MediaResourceResolver(landing_root=state_manager.media_landing_root("message"))

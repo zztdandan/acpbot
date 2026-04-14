@@ -44,4 +44,4 @@ class OtherUpdateHandler(StateUpdateHandler):
         payload = sanitize_json_value(update)
         pool.accept(payload)
         state_manager.append_other_update(label=self.build_bucket_key(update), payload=payload)
-        return HandlerConsumeResult(destroy_pool_keys=[self.build_pool_key(update)])
+        return HandlerConsumeResult(immediate_finalize=True)

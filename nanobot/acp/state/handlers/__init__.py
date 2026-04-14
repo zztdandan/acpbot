@@ -7,6 +7,7 @@ from nanobot.acp.state.handlers.consume_only import build_consume_only_handlers
 from nanobot.acp.state.handlers.message_media import AgentMessageMediaHandler
 from nanobot.acp.state.handlers.message_text import AgentMessageTextHandler
 from nanobot.acp.state.handlers.other import OtherUpdateHandler
+from nanobot.acp.state.handlers.permission import PermissionHandler
 from nanobot.acp.state.handlers.plan import PlanUpdateHandler
 from nanobot.acp.state.handlers.thought import AgentThoughtHandler
 from nanobot.acp.state.handlers.tool import ToolUpdateHandler
@@ -27,6 +28,7 @@ def build_default_handlers() -> list[StateUpdateHandler]:
         AgentThoughtHandler(),
         PlanUpdateHandler(),
         ToolUpdateHandler(),
+        PermissionHandler(),
     ]
     handlers.extend(build_consume_only_handlers())
     handlers.append(OtherUpdateHandler())
@@ -40,6 +42,7 @@ __all__ = [
     "HandlerConsumeResult",
     "OtherUpdateHandler",
     "PlanUpdateHandler",
+    "PermissionHandler",
     "StateUpdateHandler",
     "ToolUpdateHandler",
     "build_default_handlers",

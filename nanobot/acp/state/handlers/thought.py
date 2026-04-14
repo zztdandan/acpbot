@@ -44,4 +44,4 @@ class AgentThoughtHandler(StateUpdateHandler):
         text = str(getattr(typed_update.content, "text", "") or "")
         typed_pool.accept(text)
         state_manager.update_named_metadata("latest_thought", typed_pool.text)
-        return HandlerConsumeResult(flush_results=[typed_pool.flush()])
+        return HandlerConsumeResult()

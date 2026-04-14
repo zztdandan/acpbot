@@ -1,13 +1,15 @@
-"""处理器抽象与公共工具：统一更新匹配、池创建与载荷归一化约束。"""
+"""处理器抽象与公共工具：统一更新匹配、池创建、flush 出包与载荷归一化约束。"""
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, cast
 
 from nanobot.acp.contracts import JSONMap, JSONValue
 from nanobot.acp.state.models import ACPBucketType, ACPPool, ACPUpdateType, FlushResult, PoolKey
+from nanobot.acp.state.outbound_schema import build_progress_outbound
+from nanobot.bus.events import OutboundMessage
 
 if TYPE_CHECKING:
     from nanobot.acp.state.manager import SessionStateManager
@@ -15,28 +17,13 @@ if TYPE_CHECKING:
 
 @dataclass(slots=True)
 class HandlerConsumeResult:
-    """处理器消费结果：描述一次消费后需要镜像和销毁的后续动作。
+    """处理器消费结果：只描述结构性结论，不直接触发 flush/publish。"""
 
-    职责：
-        - 收集本次消费产生的刷新结果，交给路由器统一镜像
-        - 声明哪些池需要在消费后立即销毁，避免处理器直接操作索引
-    """
-
-    flush_results: list[FlushResult | None] = field(
-        default_factory=list
-    )  # 本次消费产生的待镜像结果；空值会由路由器过滤。
-    destroy_pool_keys: list[PoolKey] = field(
-        default_factory=list
-    )  # 需要立即销毁的池主键；适用于一次性池。
+    immediate_finalize: bool = False
 
 
 class StateUpdateHandler(ABC):
-    """状态更新处理器基类：约束单类更新如何映射到池与请求级聚合。
-
-    职责：
-        - 定义更新匹配规则与池创建规则
-        - 把具体更新的消费逻辑封装为独立处理器，避免管理器膨胀
-    """
+    """状态更新处理器基类：约束单类更新如何映射到池与请求级聚合。"""
 
     name: str
     update_type: ACPUpdateType
@@ -44,15 +31,15 @@ class StateUpdateHandler(ABC):
 
     @abstractmethod
     def match(self, update: object) -> bool:
-        """判断当前处理器是否负责该更新；注册表会按顺序依次尝试。"""
+        """判断当前处理器是否负责该更新。"""
 
     @abstractmethod
     def create_pool(self, *, bucket_key: str) -> ACPPool:
-        """创建该处理器对应的池实例；只在索引缺失时由路由器调用。"""
+        """创建该处理器对应的池实例。"""
 
     @abstractmethod
     def build_bucket_key(self, update: object) -> str:
-        """为当前更新计算池索引键；不同处理器可以定义不同隔离粒度。"""
+        """为当前更新计算池索引键。"""
 
     @abstractmethod
     def consume(
@@ -62,28 +49,56 @@ class StateUpdateHandler(ABC):
         update: object,
         pool: ACPPool,
     ) -> HandlerConsumeResult:
-        """消费更新并写入池或聚合态；路由器会根据返回值执行镜像与销毁。"""
+        """消费更新并写入池或 request-scope 聚合；内部保持 `consume -> accept` 主链。"""
 
     def build_pool_key(self, update: object) -> PoolKey:
-        """把 `bucket_type` 与 `bucket_key` 组合为统一索引主键；供管理器持有。"""
-
         return PoolKey(bucket_type=self.bucket_type, bucket_key=self.build_bucket_key(update))
+
+    def build_progress_outbound(
+        self,
+        *,
+        state_manager: SessionStateManager,
+        flush_result: FlushResult,
+    ) -> OutboundMessage | None:
+        """把一次 flush 结果编制成 progress outbound；默认走 state 公共出包规则。"""
+
+        return build_progress_outbound(
+            channel=state_manager.channel,
+            chat_id=state_manager.chat_id,
+            result=flush_result,
+        )
+
+    def on_deadhand(self, *, state_manager: SessionStateManager, pool: ACPPool) -> None:
+        """死手触发回调；默认无需额外动作，权限类处理器可按需覆盖。"""
+
+        del state_manager, pool
+
+    def do_deadhand_operate_and_build_progress_outbound(
+        self,
+        *,
+        state_manager: SessionStateManager,
+        pool: ACPPool,
+    ) -> OutboundMessage | None:
+        """执行死手处理并构造 outbound；默认兼容旧 `on_deadhand + flush + build` 主链。"""
+
+        self.on_deadhand(state_manager=state_manager, pool=pool)
+        flush_result = pool.flush()
+        if flush_result is None:
+            return None
+        return self.build_progress_outbound(
+            state_manager=state_manager,
+            flush_result=flush_result,
+        )
 
 
 class _ModelDumpCapable(Protocol):
-    """支持 `model_dump` 的对象协议：用于在状态域内安全读取 Pydantic 模型。"""
+    """支持 `model_dump` 的对象协议：用于状态域安全读取 Pydantic 模型。"""
 
     def model_dump(self, *, by_alias: bool, exclude_none: bool) -> dict[str, object]: ...
 
 
 def sanitize_json_value(value: object) -> JSONValue:
-    """把任意载荷规整为 `JSONValue`；供最终元数据与调试痕迹复用。
-
-    处理流程：
-        - 原始标量直接返回，保持值语义不变
-        - 支持 `model_dump` 的对象先转字典，再递归规整嵌套字段
-        - 容器类型递归处理，其他对象最终退化为字符串表示
-    """
+    """把任意载荷规整为 `JSONValue`；供 final metadata 与调试痕迹复用。"""
 
     if value is None or isinstance(value, str | int | float | bool):
         return value
@@ -98,7 +113,7 @@ def sanitize_json_value(value: object) -> JSONValue:
 
 
 def sanitize_json_map(value: object) -> JSONMap:
-    """把任意对象规整为 `JSONMap`；非映射对象会包成 `{"value": ...}` 结构。"""
+    """把任意对象规整为 `JSONMap`；非映射对象会包成 `{"value": ...}`。"""
 
     normalized = sanitize_json_value(value)
     if isinstance(normalized, dict):
