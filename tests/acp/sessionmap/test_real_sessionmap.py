@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -12,9 +13,30 @@ from tests.acp.sessionmap.helpers import (
     close_runtime_quietly,
     discover_real_session_seed,
     extract_json_object,
+    session_map_file_for,
     write_checked_in_sessionmap_fixture,
     write_runtime_config,
 )
+
+
+def _build_current_model_probe() -> str:
+    """要求 ACP 仅返回当前模型 JSON，避免测试解析自然语言。"""
+
+    return (
+        "Do not use tools. Reply with exactly one JSON object and no extra text: "
+        '{"current_model":"<exact model id used for this response>"}'
+    )
+
+
+def _extract_reported_model(outbound_content: str) -> str:
+    """统一提取当前模型字段，便于对真实返回做弱校验。"""
+
+    payload = extract_json_object(outbound_content)
+    reported_model = payload.get("current_model")
+    assert isinstance(reported_model, str) and reported_model, (
+        f"ACP response should include a non-empty current_model field, got {payload}"
+    )
+    return reported_model
 
 
 @pytest.mark.asyncio
@@ -116,7 +138,8 @@ async def test_ensure_ready_session_replays_bound_model_after_restore(
         )
         assert runtime_entry.acp_side_session_id == seed.target_session_id
         assert runtime_entry.capabilities.current_model == seed.target_model_id
-        assert runtime_entry.capabilities.current_agent == seed.target_agent_id
+        if seed.target_agent_id is not None:
+            assert runtime_entry.capabilities.current_agent == seed.target_agent_id
         assert (
             runtime.session_runtime_manager.get_by_acp_side_session_id(seed.target_session_id)
             is runtime_entry
@@ -125,14 +148,10 @@ async def test_ensure_ready_session_replays_bound_model_after_restore(
         )
 
         verification_outbound = await runtime.process_direct(
-            (
-                "Do not use tools. Reply with exactly one JSON object and no extra text: "
-                '{"current_model":"<exact model id used for this response>"}'
-            ),
+            _build_current_model_probe(),
             session_key=seed.target_session_key,
         )
-        verification_payload = extract_json_object(verification_outbound.content)
-        reported_model_id = verification_payload.get("current_model")
+        reported_model_id = _extract_reported_model(verification_outbound.content)
 
         print(
             "ENSURE CHECK:",
@@ -156,9 +175,10 @@ async def test_ensure_ready_session_replays_bound_model_after_restore(
         )
         assert capabilities is not None
         assert capabilities.current_model == seed.target_model_id
-        assert capabilities.current_agent == seed.target_agent_id
         assert seed.target_model_id in capabilities.available_models
-        assert seed.target_agent_id in capabilities.available_agents
+        if seed.target_agent_id is not None:
+            assert capabilities.current_agent == seed.target_agent_id
+            assert seed.target_agent_id in capabilities.available_agents
 
         assert capabilities is not None
         prompt_metadata = capabilities.build_prompt_metadata()
@@ -166,11 +186,180 @@ async def test_ensure_ready_session_replays_bound_model_after_restore(
         agents_command = capabilities.render_agents_command()
 
         assert prompt_metadata["nanobot_session_model"] == seed.target_model_id
-        assert prompt_metadata["nanobot_session_agent"] == seed.target_agent_id
         assert f"Current model: {seed.target_model_id}" in models_command
         assert seed.target_model_id in models_command
-        assert f"Current agent: {seed.target_agent_id}" in agents_command
-        assert seed.target_agent_id in agents_command
+        if seed.target_agent_id is not None:
+            assert prompt_metadata["nanobot_session_agent"] == seed.target_agent_id
+            assert f"Current agent: {seed.target_agent_id}" in agents_command
+            assert seed.target_agent_id in agents_command
+    finally:
+        await close_runtime_quietly(runtime)
+        set_config_path(previous_config_path)
+
+
+@pytest.mark.asyncio
+async def test_process_direct_creates_real_session_for_new_websocket_key_and_persists_mapping(
+    tmp_path: Path,
+) -> None:
+    """验证首次真实外部请求会 lazy bootstrap，并为新 websocket 会话创建真实绑定。"""
+
+    seed = await discover_real_session_seed()
+    config_path = write_runtime_config(tmp_path)
+    write_checked_in_sessionmap_fixture(config_path=config_path)
+
+    random_chat_id = f"sessionmap-{uuid4().hex}"
+    session_key = f"websocket:{random_chat_id}"
+    previous_config_path = get_config_path()
+    runtime = build_runtime(config_path)
+    try:
+        # 不显式 ensure_connection，直接走真实外部入口，验证 lazy bootstrap + 新建会话。
+        assert runtime.sessionmap_binding_manager.is_bootstrapped() is False
+        assert runtime.sessionmap_binding_manager.resolve_session_id(session_key) is None
+
+        first_outbound = await runtime.process_direct(
+            _build_current_model_probe(),
+            session_key=session_key,
+            channel="websocket",
+            chat_id=random_chat_id,
+        )
+        reported_model_id = _extract_reported_model(first_outbound.content)
+        assert "gpt" in reported_model_id.lower(), (
+            f"newly created real session should report a GPT model, got {reported_model_id}"
+        )
+
+        runtime_entry = runtime.session_runtime_manager.get_by_nanobot_side_session_key(session_key)
+        assert runtime.sessionmap_binding_manager.is_bootstrapped() is True
+        assert runtime_entry is not None, (
+            "first external request should create a ready runtime entry"
+        )
+        created_session_id = runtime_entry.acp_side_session_id
+        assert created_session_id not in set(seed.session_ids), (
+            "new websocket session key should create a fresh ACP session instead of reusing fixture sessions"
+        )
+        assert (
+            runtime.sessionmap_binding_manager.resolve_session_id(session_key) == created_session_id
+        )
+
+        persisted_payload = json.loads(
+            session_map_file_for(config_path).read_text(encoding="utf-8")
+        )
+        persisted_entry = next(
+            (
+                entry
+                for entry in persisted_payload.get("mappings", [])
+                if entry.get("nanobotSideSessionKey") == session_key
+            ),
+            None,
+        )
+        assert persisted_entry is not None, (
+            "new real session binding should be persisted to session_map.json"
+        )
+        assert persisted_entry.get("acpSideSessionId") == created_session_id
+        persisted_model_id = persisted_entry.get("boundModel")
+        assert isinstance(persisted_model_id, str) and persisted_model_id, (
+            f"new real session binding should persist a boundModel, got {persisted_entry}"
+        )
+        assert persisted_model_id == runtime.acp_config.default_model == reported_model_id, (
+            "new real session should persist the model that was actually used for the first response"
+        )
+
+        second_outbound = await runtime.process_direct(
+            _build_current_model_probe(),
+            session_key=session_key,
+            channel="websocket",
+            chat_id=random_chat_id,
+        )
+        second_reported_model_id = _extract_reported_model(second_outbound.content)
+        assert "gpt" in second_reported_model_id.lower(), (
+            f"reused real session should still report a GPT model, got {second_reported_model_id}"
+        )
+
+        reused_entry = runtime.session_runtime_manager.get_by_nanobot_side_session_key(session_key)
+        assert reused_entry is not None
+        assert reused_entry.acp_side_session_id == created_session_id, (
+            "second request for the same websocket key should reuse the session created by the first request"
+        )
+    finally:
+        await close_runtime_quietly(runtime)
+        set_config_path(previous_config_path)
+
+
+@pytest.mark.asyncio
+async def test_process_direct_restores_same_target_session_after_runtime_reset(
+    tmp_path: Path,
+) -> None:
+    """验证 reset 只清空 runtime entry，不丢失 binding truth，后续请求恢复到同一真实 session。"""
+
+    seed = await discover_real_session_seed()
+    config_path = write_runtime_config(tmp_path)
+    write_checked_in_sessionmap_fixture(config_path=config_path)
+
+    previous_config_path = get_config_path()
+    runtime = build_runtime(config_path)
+    try:
+        await runtime.ensure_connection()
+        first_outbound = await runtime.process_direct(
+            _build_current_model_probe(),
+            session_key=seed.target_session_key,
+        )
+        first_reported_model_id = _extract_reported_model(first_outbound.content)
+        assert "gpt" in first_reported_model_id.lower(), (
+            f"restored target session should report a GPT model before reset, got {first_reported_model_id}"
+        )
+
+        first_entry = runtime.session_runtime_manager.get_by_nanobot_side_session_key(
+            seed.target_session_key
+        )
+        assert first_entry is not None
+        original_session_id = first_entry.acp_side_session_id
+        assert original_session_id == seed.target_session_id
+
+        await runtime.reset_connection()
+
+        assert (
+            runtime.session_runtime_manager.get_by_nanobot_side_session_key(seed.target_session_key)
+            is None
+        ), "reset should clear runtime-ready entries"
+        assert runtime.sessionmap_binding_manager.is_bootstrapped() is False
+
+        persisted_payload = json.loads(
+            session_map_file_for(config_path).read_text(encoding="utf-8")
+        )
+        persisted_entry = next(
+            (
+                entry
+                for entry in persisted_payload.get("mappings", [])
+                if entry.get("nanobotSideSessionKey") == seed.target_session_key
+            ),
+            None,
+        )
+        assert persisted_entry is not None, "reset should not remove the persisted target binding"
+        assert persisted_entry.get("acpSideSessionId") == original_session_id
+        assert persisted_entry.get("boundModel") == seed.target_model_id, (
+            "reset should preserve the persisted boundModel for the restored target session"
+        )
+
+        second_outbound = await runtime.process_direct(
+            _build_current_model_probe(),
+            session_key=seed.target_session_key,
+        )
+        second_reported_model_id = _extract_reported_model(second_outbound.content)
+        assert "gpt" in second_reported_model_id.lower(), (
+            f"restored target session should report a GPT model after reset, got {second_reported_model_id}"
+        )
+
+        second_entry = runtime.session_runtime_manager.get_by_nanobot_side_session_key(
+            seed.target_session_key
+        )
+        assert runtime.sessionmap_binding_manager.is_bootstrapped() is True
+        assert second_entry is not None
+        assert second_entry.acp_side_session_id == original_session_id, (
+            "post-reset request should recover the same persisted ACP session instead of creating a new one"
+        )
+        assert (
+            runtime.sessionmap_binding_manager.resolve_session_id(seed.target_session_key)
+            == original_session_id
+        ), "post-reset process_direct should reload sessionmap truth and restore the target binding"
     finally:
         await close_runtime_quietly(runtime)
         set_config_path(previous_config_path)

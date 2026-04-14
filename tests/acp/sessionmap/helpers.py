@@ -36,7 +36,7 @@ class RealSessionSeed:
     target_session_id: str
     target_session_key: str
     target_model_id: str
-    target_agent_id: str
+    target_agent_id: str | None
 
 
 class _ACPCallbackSink:
@@ -177,8 +177,9 @@ async def discover_real_session_seed() -> RealSessionSeed:
             for entry in available_modes
             if isinstance((mode_id := getattr(entry, "id", None)), str) and mode_id
         }
-        if TARGET_AGENT_ID not in available_mode_ids:
-            pytest.skip("Real sessionmap tests require the build agent in ACP available_modes")
+        # 真实后端可用 mode 会随环境波动；这里只在存在 build 时记录，
+        # 具体断言由各测试按需决定，避免让所有 real-session 用例一起被 skip。
+        target_agent_id = TARGET_AGENT_ID if TARGET_AGENT_ID in available_mode_ids else None
 
         return RealSessionSeed(
             session_ids=fixture_session_ids,
@@ -186,7 +187,7 @@ async def discover_real_session_seed() -> RealSessionSeed:
             target_session_id=TARGET_SESSION_ID,
             target_session_key=TARGET_SESSION_KEY,
             target_model_id=target_model_id,
-            target_agent_id=TARGET_AGENT_ID,
+            target_agent_id=target_agent_id,
         )
 
 
