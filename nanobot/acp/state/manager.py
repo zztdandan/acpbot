@@ -1,8 +1,9 @@
-"""单请求状态聚合与进度发布层。"""
+"""SessionStateManager：单请求 state owner，统一持有池索引、权限等待与 final 聚合。"""
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Protocol
 
 from loguru import logger
@@ -20,9 +21,10 @@ from nanobot.acp.contracts import (
 )
 from nanobot.acp.observability import ObservabilityEvent
 from nanobot.acp.runtime_models import ProgressCallback
-from nanobot.acp.state.models import RequestScopeState
+from nanobot.acp.state.handlers.base import sanitize_json_value
+from nanobot.acp.state.models import ACPBucketType, ACPPool, PoolKey, RequestScopeState
 from nanobot.acp.state.permission_events import PendingPermissionRequest
-from nanobot.acp.state.pools import MediaPool, MessageTextPool, PermissionPool, ToolPool
+from nanobot.acp.state.pools import PermissionPool
 from nanobot.bus.events import OutboundMessage
 
 if TYPE_CHECKING:
@@ -30,7 +32,7 @@ if TYPE_CHECKING:
 
 
 class _RuntimeObservabilityOwner(Protocol):
-    """运行时观测事件上报协议。"""
+    """运行时观测上报协议：state 只发事实，不直接操作 observability 内部队列。"""
 
     async def push_observability(self, event: ObservabilityEvent) -> None:
         """上报一条结构化观测事件。"""
@@ -38,7 +40,17 @@ class _RuntimeObservabilityOwner(Protocol):
 
 
 class SessionStateManager:
-    """负责对应领域状态与流程编排。"""
+    """单请求状态管理器：统一 owner 池索引、权限等待、request-scope 聚合与 final materialize。
+
+    职责：
+        - 以 `PoolKey -> pool` 形式持有当前请求全部池实例，替代“每类一个成员变量”的旧模式
+        - 提供权限请求/回复入口，保证 pending future 生命周期收口在 state 内
+        - 维护 final_text / media_paths / final_metadata，作为最终结果物化事实源
+
+    生命周期：
+        - 创建：请求真正进入 ACP 执行时，由 ProcessRuntimeManager 新建
+        - 销毁：请求完成或失败后，经 close 链路尾刷并销毁全部池索引
+    """
 
     def __init__(
         self,
@@ -51,7 +63,8 @@ class SessionStateManager:
         chat_id: str,
         on_progress: ProgressCallback | None,
     ) -> None:
-        """初始化当前对象并建立必要状态。"""
+        """建立单请求 state；所有依赖都按请求粒度注入，避免 runtime 顶层共享字典回潮。"""
+
         self._runtime = runtime
         self.request_key = request_key
         self.nanobot_side_session_key = nanobot_side_session_key
@@ -60,26 +73,85 @@ class SessionStateManager:
         self.chat_id = chat_id
         self.on_progress = on_progress
         self.request_scope = RequestScopeState()
-        self.message_text_pool = MessageTextPool()
-        self.media_pool = MediaPool()
-        self.tool_pool = ToolPool()
-        self.permission_pool = PermissionPool()
+        self._pools: dict[PoolKey, ACPPool] = {}
         self._closed = False
         self._progress_router: ProgressRouter | None = None
         self._pending_permission_future: asyncio.Future[str] | None = None
         self._pending_permission_request: PendingPermissionRequest | None = None
 
     def is_closed(self) -> bool:
-        """关闭运行时并释放资源。"""
+        """返回当前 state 是否已关闭；late update/permission 会据此拒绝写入。"""
+
         return self._closed
 
     def bind_progress_router(self, progress_router: ProgressRouter) -> None:
-        """绑定进度路由器。"""
+        """绑定请求级 ProgressRouter；供权限分支与普通更新共享同一出口。"""
 
         self._progress_router = progress_router
 
+    def get_or_create_pool(
+        self,
+        pool_key: PoolKey,
+        *,
+        factory: Callable[[], ACPPool],
+    ) -> ACPPool:
+        """按池主键复用或创建池实例；tool 等多实例类型依赖此入口隔离并发。"""
+
+        pool = self._pools.get(pool_key)
+        if pool is None:
+            pool = factory()
+            self._pools[pool_key] = pool
+        return pool
+
+    def destroy_pool(self, pool_key: PoolKey) -> None:
+        """从索引中销毁一个池；适用于 other 一次性池与 request close 收尾。"""
+
+        self._pools.pop(pool_key, None)
+
+    def iter_pools(self) -> Iterable[tuple[PoolKey, ACPPool]]:
+        """遍历当前所有活跃池；router close/flush_all 通过该入口统一处理。"""
+
+        return tuple(self._pools.items())
+
+    def update_text_snapshot(self, text: str) -> None:
+        """刷新 final_text 与 partial_text；供文本 handler 在每次增量后同步。"""
+
+        normalized = text.strip()
+        self.request_scope.final_text = normalized
+        self.request_scope.partial_text = normalized
+
+    def append_media_path(self, media_path: str, *, source: str = "message") -> None:
+        """把媒体路径并入请求聚合结果；消息媒体排前，工具附件排后，避免最终顺序漂移。"""
+
+        if not media_path:
+            return
+        target = (
+            self.request_scope.tool_media_paths
+            if source == "tool"
+            else self.request_scope.message_media_paths
+        )
+        if media_path not in target:
+            target.append(media_path)
+        self.request_scope.media_paths = [
+            *self.request_scope.message_media_paths,
+            *self.request_scope.tool_media_paths,
+        ]
+
+    def update_named_metadata(self, key: str, payload: object) -> None:
+        """把一条命名事实写入 final_metadata；仅显式采纳的字段允许进入最终结果。"""
+
+        self.request_scope.final_metadata[key] = sanitize_json_value(payload)
+
+    def append_other_update(self, *, label: str, payload: object) -> None:
+        """记录未识别更新痕迹；便于后续审计其他池是否仍有漏网类型。"""
+
+        existing = self.request_scope.final_metadata.get("other_updates")
+        items = list(existing) if isinstance(existing, list) else []
+        items.append({"label": label, "payload": sanitize_json_value(payload)})
+        self.request_scope.final_metadata["other_updates"] = items
+
     async def emit_progress(self, *, content: str, metadata: JSONMap) -> None:
-        """向外镜像发布进度。"""
+        """向请求级 on_progress 镜像进度；兼容旧 `tool_hint` 参数约定。"""
 
         if not content or self.on_progress is None:
             return
@@ -107,7 +179,13 @@ class SessionStateManager:
         *,
         progress_router: ProgressRouter,
     ) -> None:
-        """消费会话更新并写入状态池。"""
+        """接收一条 session_update 并委托 ProgressRouter 分派；manager 自己不再写大段 if/else。
+
+        处理流程：
+            - 若 state 已关闭，则上报 late update 并直接拒绝写入
+            - 绑定当前请求的 ProgressRouter，确保普通更新与权限分支共用同一出口
+            - 把 update 交给 router 做 handler 解析、池建立/复用、flush 与销毁
+        """
 
         if self._closed:
             await self._runtime.push_observability(
@@ -120,56 +198,12 @@ class SessionStateManager:
                 )
             )
             return
-
-        from acp.schema import (
-            AgentMessageChunk,
-            EmbeddedResourceContentBlock,
-            ImageContentBlock,
-            ResourceContentBlock,
-            TextContentBlock,
-            ToolCallProgress,
-            ToolCallStart,
-        )
-
-        if isinstance(update, AgentMessageChunk) and isinstance(update.content, TextContentBlock):
-            text = str(getattr(update.content, "text", "") or "")
-            self.message_text_pool.accept(text)
-            self.request_scope.final_text = self.message_text_pool.text.strip()
-            self.request_scope.partial_text = self.message_text_pool.text.strip()
-            await progress_router.emit(self.message_text_pool.flush())
-            return
-
-        if isinstance(update, AgentMessageChunk) and isinstance(
-            update.content,
-            (ImageContentBlock, ResourceContentBlock, EmbeddedResourceContentBlock),
-        ):
-            media_path = self._extract_media_path(update.content)
-            if media_path:
-                self.media_pool.accept(media_path)
-                if media_path not in self.request_scope.media_paths:
-                    self.request_scope.media_paths.append(media_path)
-                await progress_router.emit(self.media_pool.flush())
-            return
-
-        if isinstance(update, ToolCallStart):
-            tool_name = str(
-                getattr(update, "tool_name", None) or getattr(update, "toolName", "tool")
-            )
-            self.tool_pool.accept(f"Running tool: {tool_name}")
-            await progress_router.emit(self.tool_pool.flush())
-            return
-
-        if isinstance(update, ToolCallProgress):
-            text = str(
-                getattr(update, "message", None) or getattr(update, "status", "tool progress")
-            )
-            self.tool_pool.accept(text)
-            await progress_router.emit(self.tool_pool.flush())
-            return
+        self._progress_router = progress_router
+        await progress_router.handle_update(update)
 
     @staticmethod
-    def _extract_media_path(block: ACPResourceBlock) -> str | None:
-        """执行该方法定义的处理流程并返回结果。"""
+    def extract_media_path(block: ACPResourceBlock) -> str | None:
+        """从 ACP 内容块中提取本地媒体路径；兼容 uri/path/resource.uri 三种来源。"""
 
         for attr in ("uri", "path"):
             value = getattr(block, attr, None)
@@ -190,7 +224,14 @@ class SessionStateManager:
         options: list[ACPPermissionOption],
         tool_call: ACPToolCall | None = None,
     ) -> object:
-        """处理权限请求并返回权限结果。"""
+        """处理一条权限请求；等待 inbound reply 或超时后回传 ACP SDK 需要的响应对象。
+
+        处理流程：
+            - 关闭态直接拒绝，避免 late permission 污染已结束 request
+            - 创建 pending future，并把权限提示写入权限池镜像给 on_progress
+            - 等待用户回复；超时时只上报 observability，不改写 request 生命周期
+            - 清理 pending 状态并把用户选择转成 ACP SDK 的 RequestPermissionResponse
+        """
 
         if self._closed:
             raise RuntimeError("permission request received after state closed")
@@ -205,9 +246,13 @@ class SessionStateManager:
             tool_call=tool_call,
             prompt_text=prompt,
         )
-        self.permission_pool.accept(prompt)
+        permission_pool = self.get_or_create_pool(
+            PoolKey(bucket_type=ACPBucketType.PERMISSION, bucket_key="permission"),
+            factory=lambda: PermissionPool(bucket_key="permission"),
+        )
+        permission_pool.accept(prompt)
         if self._progress_router is not None:
-            await self._progress_router.emit(self.permission_pool.flush())
+            await self._progress_router.emit(permission_pool.flush())
 
         try:
             selected_option_id = await asyncio.wait_for(
@@ -233,14 +278,15 @@ class SessionStateManager:
         )
 
     def has_pending_permission(self) -> bool:
-        """执行该方法定义的处理流程并返回结果。"""
+        """判断当前请求是否仍在等待权限回复；供 inbound 侧快速筛选目标 request。"""
+
         return (
             self._pending_permission_future is not None
             and not self._pending_permission_future.done()
         )
 
     def looks_like_permission_reply(self, reply_text: str) -> bool:
-        """构造命令回复消息。"""
+        """判断一条入站文本是否命中当前 pending permission；只做识别，不写状态。"""
 
         request = self._pending_permission_request
         if request is None:
@@ -255,7 +301,7 @@ class SessionStateManager:
         return self._select_permission_option(request.options, normalized) is not None
 
     async def handle_permission_reply(self, *, reply_text: str) -> str:
-        """消费权限回复并唤醒等待方。"""
+        """消费权限回复并唤醒等待中的权限 future；未命中时只回提示文本与 observability。"""
 
         future = self._pending_permission_future
         request = self._pending_permission_request
@@ -287,7 +333,7 @@ class SessionStateManager:
     def _select_permission_option(
         options: list[ACPPermissionOption], reply_text: str
     ) -> str | None:
-        """执行该方法定义的处理流程并返回结果。"""
+        """把用户回复映射到 ACP option_id；兼容编号、kind、allow/deny 等简写。"""
 
         reply = reply_text.strip().lower()
         if not reply:
@@ -324,7 +370,7 @@ class SessionStateManager:
 
     @staticmethod
     def _render_permission_prompt(options: list[ACPPermissionOption]) -> str:
-        """执行该方法定义的处理流程并返回结果。"""
+        """把权限选项渲染成可回复的提示文本；供 on_progress 与直接回显复用。"""
         lines = ["ACP requires permission. Reply with /permission <number>:"]
         for index, option in enumerate(options, start=1):
             kind = getattr(
@@ -335,7 +381,7 @@ class SessionStateManager:
         return "\n".join(lines)
 
     def materialize_final_outbound(self, *, partial: bool = False) -> OutboundMessage:
-        """按请求聚合事实物化最终结果。"""
+        """按 request-scope 聚合事实物化最终结果；partial 模式用于异常链路回退。"""
 
         content = self.request_scope.partial_text if partial else self.request_scope.final_text
         return OutboundMessage(
@@ -347,7 +393,7 @@ class SessionStateManager:
         )
 
     async def close(self) -> None:
-        """关闭运行时并释放资源。"""
+        """关闭当前请求 state；尾刷全部池、取消权限等待并阻止后续写入。"""
 
         if self._closed:
             return

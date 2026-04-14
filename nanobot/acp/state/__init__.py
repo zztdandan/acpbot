@@ -1,4 +1,4 @@
-"""单请求状态聚合与进度发布层。"""
+"""state 包导出：暴露请求级状态管理器、路由器与基础模型。"""
 
 from __future__ import annotations
 
@@ -9,16 +9,17 @@ from nanobot.acp.state.models import (
     ACPOutboundKind,
     ACPUpdateType,
     FlushResult,
+    PoolKey,
     RequestScopeState,
 )
-from nanobot.acp.state.router import ProgressRouter
+from nanobot.acp.state.router import HandlerRegistry, ProgressRouter
 
 
 class _ACPDispatchError(RuntimeError):
-    """负责本对象定义的职责边界与生命周期。"""
+    """ACP dispatch 异常：在执行链路需要保留 partial fallback 时向上游传递信号。"""
 
     def __init__(self, partial_response: str = "") -> None:
-        """初始化当前对象并建立必要状态。"""
+        """记录 partial_response；供 ProcessRuntimeManager 在失败链路判断是否物化 partial final。"""
         super().__init__("ACP dispatch failed")
         self.partial_response = partial_response
 
@@ -28,6 +29,8 @@ __all__ = [
     "ACPOutboundKind",
     "ACPUpdateType",
     "FlushResult",
+    "HandlerRegistry",
+    "PoolKey",
     "ProgressRouter",
     "RequestScopeState",
     "SessionStateManager",

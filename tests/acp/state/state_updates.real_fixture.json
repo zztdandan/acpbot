@@ -1,0 +1,409 @@
+{
+  "runtimeSeed": {
+    "requestKey": "state-real-request",
+    "nanobotSideSessionKey": "nanobot-sessionmap-target",
+    "channel": "websocket",
+    "chatId": "state-real-chat"
+  },
+  "scenarios": {
+    "message_only": {
+      "notifications": [
+        {
+          "sessionId": "__REAL_SESSION_ID__",
+          "update": {
+            "sessionUpdate": "agent_message_chunk",
+            "content": {
+              "type": "text",
+              "text": "State"
+            }
+          }
+        },
+        {
+          "sessionId": "__REAL_SESSION_ID__",
+          "update": {
+            "sessionUpdate": "agent_message_chunk",
+            "content": {
+              "type": "text",
+              "text": "State module"
+            }
+          }
+        },
+        {
+          "sessionId": "__REAL_SESSION_ID__",
+          "update": {
+            "sessionUpdate": "agent_message_chunk",
+            "content": {
+              "type": "text",
+              "text": "State module accepts"
+            }
+          }
+        },
+        {
+          "sessionId": "__REAL_SESSION_ID__",
+          "update": {
+            "sessionUpdate": "agent_message_chunk",
+            "content": {
+              "type": "image",
+              "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+yQJ8AAAAASUVORK5CYII=",
+              "mimeType": "image/png",
+              "uri": "file:///tmp/acp-state/message/latency-plot.png"
+            }
+          }
+        },
+        {
+          "sessionId": "__REAL_SESSION_ID__",
+          "update": {
+            "sessionUpdate": "agent_message_chunk",
+            "content": {
+              "type": "resource_link",
+              "name": "latency-report",
+              "uri": "file:///tmp/acp-state/message/latency-report.json",
+              "mimeType": "application/json",
+              "title": "Latency report"
+            }
+          }
+        },
+        {
+          "sessionId": "__REAL_SESSION_ID__",
+          "update": {
+            "sessionUpdate": "agent_message_chunk",
+            "content": {
+              "type": "resource",
+              "resource": {
+                "uri": "file:///tmp/acp-state/message/latency-summary.md",
+                "text": "# Latency summary\n\nP50 and P95 are stable.",
+                "mimeType": "text/markdown"
+              }
+            }
+          }
+        },
+        {
+          "sessionId": "__REAL_SESSION_ID__",
+          "update": {
+            "sessionUpdate": "agent_message_chunk",
+            "content": {
+              "type": "text",
+              "text": "State module accepts updates fast."
+            }
+          }
+        }
+      ],
+      "expected": {
+        "progressText": [
+          "State",
+          "State module",
+          "State module accepts",
+          "State module accepts updates fast."
+        ],
+        "progressMedia": [
+          [
+            "/tmp/acp-state/message/latency-plot.png"
+          ],
+          [
+            "/tmp/acp-state/message/latency-report.json"
+          ],
+          [
+            "/tmp/acp-state/message/latency-summary.md"
+          ]
+        ],
+        "final": {
+          "content": "State module accepts updates fast.",
+          "media": [
+            "/tmp/acp-state/message/latency-plot.png",
+            "/tmp/acp-state/message/latency-report.json",
+            "/tmp/acp-state/message/latency-summary.md"
+          ]
+        }
+      }
+    },
+    "tool_only": {
+      "notifications": [
+        {
+          "sessionId": "__REAL_SESSION_ID__",
+          "update": {
+            "sessionUpdate": "tool_call",
+            "toolCallId": "tool-state-01",
+            "title": "Read state fixture inputs",
+            "kind": "read",
+            "status": "pending",
+            "locations": [
+              {
+                "path": "/workspace/nanobot/tests/acp/state/state_updates.real_fixture.json"
+              }
+            ],
+            "rawInput": {
+              "path": "/workspace/nanobot/tests/acp/state/state_updates.real_fixture.json"
+            },
+            "content": [
+              {
+                "type": "content",
+                "content": {
+                  "type": "resource_link",
+                  "name": "state-start-attachment",
+                  "uri": "file:///tmp/acp-state/tool/start-readme.md",
+                  "mimeType": "text/markdown",
+                  "title": "state start attachment"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "sessionId": "__REAL_SESSION_ID__",
+          "update": {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "tool-state-01",
+            "title": "Read state fixture inputs",
+            "status": "in_progress",
+            "content": [
+              {
+                "type": "content",
+                "content": {
+                  "type": "image",
+                  "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+yQJ8AAAAASUVORK5CYII=",
+                  "mimeType": "image/png",
+                  "uri": "file:///tmp/acp-state/tool/progress-plot.png"
+                }
+              },
+              {
+                "type": "terminal",
+                "terminalId": "term-state-01"
+              }
+            ],
+            "rawOutput": {
+              "lines": 42,
+              "source": "state-fixture"
+            }
+          }
+        },
+        {
+          "sessionId": "__REAL_SESSION_ID__",
+          "update": {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "tool-state-01",
+            "title": "Read state fixture inputs",
+            "status": "completed",
+            "content": [
+              {
+                "type": "content",
+                "content": {
+                  "type": "resource",
+                  "resource": {
+                    "uri": "file:///tmp/acp-state/tool/progress-summary.md",
+                    "text": "# Tool summary\n\nThe state fixture was loaded.",
+                    "mimeType": "text/markdown"
+                  }
+                }
+              },
+              {
+                "type": "diff",
+                "path": "/workspace/state/report.txt",
+                "oldText": "pending\n",
+                "newText": "completed\n"
+              }
+            ],
+            "rawOutput": {
+              "ok": true,
+              "artifactCount": 3
+            }
+          }
+        }
+      ],
+      "expected": {
+        "toolHints": [
+          "Running tool: tool",
+          "in_progress",
+          "completed"
+        ],
+        "toolMedia": [
+          "/tmp/acp-state/tool/start-readme.md",
+          "/tmp/acp-state/tool/progress-plot.png",
+          "/tmp/acp-state/tool/progress-summary.md"
+        ]
+      }
+    },
+    "mixed": {
+      "notifications": [
+        {
+          "sessionId": "__REAL_SESSION_ID__",
+          "update": {
+            "sessionUpdate": "agent_message_chunk",
+            "content": {
+              "type": "text",
+              "text": "State"
+            }
+          }
+        },
+        {
+          "sessionId": "__REAL_SESSION_ID__",
+          "update": {
+            "sessionUpdate": "tool_call",
+            "toolCallId": "tool-state-01",
+            "title": "Read state fixture inputs",
+            "kind": "read",
+            "status": "pending",
+            "locations": [
+              {
+                "path": "/workspace/nanobot/tests/acp/state/state_updates.real_fixture.json"
+              }
+            ],
+            "rawInput": {
+              "path": "/workspace/nanobot/tests/acp/state/state_updates.real_fixture.json"
+            },
+            "content": [
+              {
+                "type": "content",
+                "content": {
+                  "type": "resource_link",
+                  "name": "state-start-attachment",
+                  "uri": "file:///tmp/acp-state/tool/start-readme.md",
+                  "mimeType": "text/markdown",
+                  "title": "state start attachment"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "sessionId": "__REAL_SESSION_ID__",
+          "update": {
+            "sessionUpdate": "agent_message_chunk",
+            "content": {
+              "type": "text",
+              "text": "State module"
+            }
+          }
+        },
+        {
+          "sessionId": "__REAL_SESSION_ID__",
+          "update": {
+            "sessionUpdate": "agent_message_chunk",
+            "content": {
+              "type": "image",
+              "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+yQJ8AAAAASUVORK5CYII=",
+              "mimeType": "image/png",
+              "uri": "file:///tmp/acp-state/message/latency-plot.png"
+            }
+          }
+        },
+        {
+          "sessionId": "__REAL_SESSION_ID__",
+          "update": {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "tool-state-01",
+            "title": "Read state fixture inputs",
+            "status": "in_progress",
+            "content": [
+              {
+                "type": "content",
+                "content": {
+                  "type": "image",
+                  "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+yQJ8AAAAASUVORK5CYII=",
+                  "mimeType": "image/png",
+                  "uri": "file:///tmp/acp-state/tool/progress-plot.png"
+                }
+              },
+              {
+                "type": "terminal",
+                "terminalId": "term-state-01"
+              }
+            ]
+          }
+        },
+        {
+          "sessionId": "__REAL_SESSION_ID__",
+          "update": {
+            "sessionUpdate": "agent_message_chunk",
+            "content": {
+              "type": "resource_link",
+              "name": "latency-report",
+              "uri": "file:///tmp/acp-state/message/latency-report.json",
+              "mimeType": "application/json",
+              "title": "Latency report"
+            }
+          }
+        },
+        {
+          "sessionId": "__REAL_SESSION_ID__",
+          "update": {
+            "sessionUpdate": "agent_message_chunk",
+            "content": {
+              "type": "resource",
+              "resource": {
+                "uri": "file:///tmp/acp-state/message/latency-summary.md",
+                "text": "# Latency summary\n\nP50 and P95 are stable.",
+                "mimeType": "text/markdown"
+              }
+            }
+          }
+        },
+        {
+          "sessionId": "__REAL_SESSION_ID__",
+          "update": {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "tool-state-01",
+            "title": "Read state fixture inputs",
+            "status": "completed",
+            "content": [
+              {
+                "type": "content",
+                "content": {
+                  "type": "resource",
+                  "resource": {
+                    "uri": "file:///tmp/acp-state/tool/progress-summary.md",
+                    "text": "# Tool summary\n\nThe state fixture was loaded.",
+                    "mimeType": "text/markdown"
+                  }
+                }
+              },
+              {
+                "type": "diff",
+                "path": "/workspace/state/report.txt",
+                "oldText": "pending\n",
+                "newText": "completed\n"
+              }
+            ]
+          }
+        },
+        {
+          "sessionId": "__REAL_SESSION_ID__",
+          "update": {
+            "sessionUpdate": "agent_message_chunk",
+            "content": {
+              "type": "text",
+              "text": "State module accepts"
+            }
+          }
+        },
+        {
+          "sessionId": "__REAL_SESSION_ID__",
+          "update": {
+            "sessionUpdate": "agent_message_chunk",
+            "content": {
+              "type": "text",
+              "text": "State module accepts updates fast."
+            }
+          }
+        }
+      ],
+      "expected": {
+        "final": {
+          "content": "State module accepts updates fast.",
+          "media": [
+            "/tmp/acp-state/message/latency-plot.png",
+            "/tmp/acp-state/message/latency-report.json",
+            "/tmp/acp-state/message/latency-summary.md",
+            "/tmp/acp-state/tool/start-readme.md",
+            "/tmp/acp-state/tool/progress-plot.png",
+            "/tmp/acp-state/tool/progress-summary.md"
+          ],
+          "toolHints": [
+            "Running tool: tool",
+            "in_progress",
+            "completed"
+          ]
+        }
+      }
+    }
+  }
+}
