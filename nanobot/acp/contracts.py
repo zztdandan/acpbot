@@ -19,6 +19,19 @@ ACPSessionPayload: TypeAlias = Any
 ACPFactoryValue: TypeAlias = Any
 ACPResourceBlock: TypeAlias = Any
 
+# ACP metadata keys (must stay consistent across inbound/state/runtime/channel boundaries).
+ACP_META_KIND = "kind"
+ACP_META_RENDER_AS = "render_as"
+ACP_META_PROGRESS = "_progress"
+ACP_META_PERMISSION_REQUEST_ID = "permission_request_id"
+
+# ACP metadata value conventions for permission/final rendering.
+ACP_META_KIND_PERMISSION = "permission"
+ACP_META_KIND_FINAL = "final"
+ACP_META_RENDER_AS_PERMISSION_REQUEST = "permission_request"
+ACP_META_RENDER_AS_PERMISSION_REPLY = "permission_reply"
+ACP_META_RENDER_AS_FINAL = "final"
+
 
 class ACPChannelName(StrEnum):
     """ACP 出站通道名枚举：约束 runtime 回发消息时可用的逻辑通道。"""

@@ -6,7 +6,13 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, cast
 
-from nanobot.acp.contracts import JSONMap, JSONValue
+from nanobot.acp.contracts import (
+    ACP_META_KIND,
+    ACP_META_PROGRESS,
+    ACP_META_RENDER_AS,
+    JSONMap,
+    JSONValue,
+)
 from nanobot.acp.state.models import (
     ACPBucketType,
     ACPOutboundKind,
@@ -72,13 +78,13 @@ class StateUpdateHandler(ABC):
         kind_value = flush_result.kind.value
         # 统一在出包层补齐语义字段，避免各个 pool/handler 分散维护。
         # 允许 pool 在 flush metadata 中显式指定 kind/render_as；这里仅做兜底补齐。
-        metadata.setdefault("kind", kind_value)
-        metadata.setdefault("render_as", kind_value)
+        metadata.setdefault(ACP_META_KIND, kind_value)
+        metadata.setdefault(ACP_META_RENDER_AS, kind_value)
         if flush_result.kind == ACPOutboundKind.TOOL:
-        # 使用统一 tool_hint约定字段，用于在各种场合下标注这个消息是工具
+            # 使用统一 tool_hint约定字段，用于在各种场合下标注这个消息是工具
             metadata.setdefault("_tool_hint", True)
         # 统一使用历史约定字段 `_progress`，让各 channel 正确识别 progress 帧。
-        metadata.setdefault("_progress", True)
+        metadata.setdefault(ACP_META_PROGRESS, True)
         return OutboundMessage(
             channel=state_manager.channel,
             chat_id=state_manager.chat_id,

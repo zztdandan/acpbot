@@ -4,7 +4,16 @@ from __future__ import annotations
 
 from typing import cast
 
-from nanobot.acp.contracts import JSONMap
+from nanobot.acp.contracts import (
+    ACP_META_KIND,
+    ACP_META_KIND_PERMISSION,
+    ACP_META_PERMISSION_REQUEST_ID,
+    ACP_META_PROGRESS,
+    ACP_META_RENDER_AS,
+    ACP_META_RENDER_AS_PERMISSION_REPLY,
+    ACP_META_RENDER_AS_PERMISSION_REQUEST,
+    JSONMap,
+)
 from nanobot.acp.state.handlers.base import HandlerConsumeResult, StateUpdateHandler
 from nanobot.acp.state.models import ACPBucketType, ACPOutboundKind, ACPUpdateType, FlushResult
 from nanobot.acp.state.permission_coordinator import PermissionCoordinator
@@ -48,10 +57,10 @@ class PermissionHandler(StateUpdateHandler):
             metadata = cast(
                 JSONMap,
                 {
-                    "render_as": "permission_request",
-                    "kind": "permission",
-                    "_progress": True,
-                    "permission_request_id": request_id,
+                    ACP_META_KIND: ACP_META_KIND_PERMISSION,
+                    ACP_META_PROGRESS: True,
+                    ACP_META_PERMISSION_REQUEST_ID: request_id,
+                    ACP_META_RENDER_AS: ACP_META_RENDER_AS_PERMISSION_REQUEST,
                 },
             )
             typed_pool.update_metadata(metadata=metadata)
@@ -84,10 +93,10 @@ class PermissionHandler(StateUpdateHandler):
                 metadata=cast(
                     JSONMap,
                     {
-                        "render_as": "permission_reply",
-                        "kind": "permission",
-                        "_progress": True,
-                        "permission_request_id": request_id,
+                        ACP_META_KIND: ACP_META_KIND_PERMISSION,
+                        ACP_META_PROGRESS: True,
+                        ACP_META_PERMISSION_REQUEST_ID: request_id,
+                        ACP_META_RENDER_AS: ACP_META_RENDER_AS_PERMISSION_REPLY,
                     },
                 )
             )
@@ -107,10 +116,10 @@ class PermissionHandler(StateUpdateHandler):
             metadata=cast(
                 JSONMap,
                 {
-                    "render_as": "permission_reply",
-                    "kind": "permission",
-                    "_progress": True,
-                    "permission_request_id": request_id,
+                    ACP_META_KIND: ACP_META_KIND_PERMISSION,
+                    ACP_META_PROGRESS: True,
+                    ACP_META_PERMISSION_REQUEST_ID: request_id,
+                    ACP_META_RENDER_AS: ACP_META_RENDER_AS_PERMISSION_REPLY,
                 },
             )
         )
@@ -121,10 +130,10 @@ class PermissionHandler(StateUpdateHandler):
                 kind=ACPOutboundKind.PERMISSION,
                 content="Permission request timed out and was automatically rejected.",
                 metadata={
-                    "render_as": "permission_reply",
-                    "kind": "permission",
-                    "_progress": True,
-                    "permission_request_id": request_id,
+                    ACP_META_KIND: ACP_META_KIND_PERMISSION,
+                    ACP_META_PROGRESS: True,
+                    ACP_META_PERMISSION_REQUEST_ID: request_id,
+                    ACP_META_RENDER_AS: ACP_META_RENDER_AS_PERMISSION_REPLY,
                 },
             )
         return self.build_progress_outbound(

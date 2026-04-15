@@ -4,6 +4,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Awaitable, Callable
 
+from nanobot.acp.contracts import (
+    ACP_META_KIND,
+    ACP_META_KIND_PERMISSION,
+    ACP_META_PERMISSION_REQUEST_ID,
+    ACP_META_PROGRESS,
+    ACP_META_RENDER_AS,
+    ACP_META_RENDER_AS_PERMISSION_REPLY,
+)
 from nanobot.acp.inbound.media import build_media_artifacts
 from nanobot.acp.runtime_models import InboundContext, ProcessRequest
 from nanobot.bus.events import OutboundMessage
@@ -28,10 +36,10 @@ def _build_permission_direct_response(
 
     outbound = runtime.new_outbound_message(channel=channel, chat_id=chat_id, content=content)
     outbound.metadata = {
-        "render_as": render_as,
-        "kind": "permission",
-        "_progress": True,
-        "permission_request_id": permission_request_id or "",
+        ACP_META_RENDER_AS: render_as,
+        ACP_META_KIND: ACP_META_KIND_PERMISSION,
+        ACP_META_PROGRESS: True,
+        ACP_META_PERMISSION_REQUEST_ID: permission_request_id or "",
     }
     return outbound
 
@@ -80,7 +88,7 @@ def build_permission_inbound_step(runtime: ACPRuntime) -> InboundStep:
                 chat_id=ctx.chat_id,
                 content="No pending permission request.",
                 permission_request_id=None,
-                render_as="permission_reply",
+                render_as=ACP_META_RENDER_AS_PERMISSION_REPLY,
             )
             return
         result = await active_entry.progress_router.handle_permission_reply(reply_text=ctx.content)
@@ -91,7 +99,7 @@ def build_permission_inbound_step(runtime: ACPRuntime) -> InboundStep:
             chat_id=ctx.chat_id,
             content=content,
             permission_request_id=result.permission_request_id,
-            render_as="permission_reply",
+            render_as=ACP_META_RENDER_AS_PERMISSION_REPLY,
         )
 
     return _permission_inbound

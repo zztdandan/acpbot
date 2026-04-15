@@ -9,7 +9,16 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from loguru import logger
 
-from nanobot.acp.contracts import ACPCallbackUpdate, ObservabilityEventName, ObservabilityScopeName
+from nanobot.acp.contracts import (
+    ACP_META_KIND,
+    ACP_META_KIND_FINAL,
+    ACP_META_PROGRESS,
+    ACP_META_RENDER_AS,
+    ACP_META_RENDER_AS_FINAL,
+    ACPCallbackUpdate,
+    ObservabilityEventName,
+    ObservabilityScopeName,
+)
 from nanobot.acp.observability import ObservabilityEvent
 from nanobot.acp.runtime_models import ProgressCallback
 from nanobot.acp.state.handlers.base import sanitize_json_value
@@ -345,12 +354,18 @@ class SessionStateManager:
         if not partial:
             # 统一最终消息协议：所有通道都看到三行 final 包裹结构，避免通道各自拼装。
             content = self._format_final_content(content)
+        final_metadata = dict(self.request_scope.final_metadata)
+        if not partial:
+            # 最终出站前统一补正语义元数据，避免前端把 final 误判成 progress。
+            final_metadata[ACP_META_KIND] = ACP_META_KIND_FINAL
+            final_metadata[ACP_META_RENDER_AS] = ACP_META_RENDER_AS_FINAL
+            final_metadata[ACP_META_PROGRESS] = False
         return OutboundMessage(
             channel=self.channel,
             chat_id=self.chat_id,
             content=content or "",
             media=list(self.request_scope.media_paths),
-            metadata=dict(self.request_scope.final_metadata),
+            metadata=final_metadata,
         )
 
     @staticmethod
