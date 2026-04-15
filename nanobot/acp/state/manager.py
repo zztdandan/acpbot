@@ -22,6 +22,9 @@ if TYPE_CHECKING:
     from nanobot.acp.state.router import ProgressRouter
 
 
+FINAL_OUTBOUND_SETTLE_SECONDS = 0.8
+
+
 class _RuntimeObservabilityOwner(Protocol):
     """运行时桥接协议：state 只通过这组窄接口触达 runtime。"""
 
@@ -178,6 +181,11 @@ class SessionStateManager:
             self.request_scope.message_media_paths.append(media_path)
         self.request_scope.media_paths = list(self.request_scope.message_media_paths)
 
+    def append_named_metadata(self, key: str, payload: object) -> None:
+        """在 最终 metadata中建立一个数组，如果这个key不是数组则格式化为一个空数组。
+        如果是数组那么把 payload 加入其中作为一项"""
+        pass
+
     def update_named_metadata(self, key: str, payload: object) -> None:
         """把显式采纳的结构化事实写入 final metadata；适用于 plan/thought 等聚合投影场景。"""
 
@@ -262,10 +270,14 @@ class SessionStateManager:
         """等待 state 完整收尾后再物化 final outbound；用于 runtime 执行完成时的统一出口。
 
         处理流程：
+            - 先等待短暂 settle 窗口，给尾部 text/media/metadata 聚合留出收口时间
             - 先执行 `close()`，强制触发 router 尾刷并终止 permission waiter
             - 再基于 request-scope 聚合事实物化最终结果
         """
 
+        # ACP 尾部 update 在执行完成后仍可能有一个很短的收口窗口，这里先等待再 close，
+        # 避免 final outbound 过早物化而丢失最后一批聚合结果。
+        await asyncio.sleep(FINAL_OUTBOUND_SETTLE_SECONDS)
         await self.close()
         return self.materialize_final_outbound(partial=False)
 

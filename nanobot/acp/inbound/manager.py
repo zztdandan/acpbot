@@ -62,20 +62,10 @@ class InboundManager:
         """处理总线入站消息；把 bus message 转成统一入站上下文后执行流水线。
 
         处理流程：
-            - 构造总线专用进度回调，把进度片段镜像回 outbound bus
+            - 总线路径不再注入 on_progress，避免与 state progress outbound 双重发布
             - 基于原始消息构造 `InboundContext`
             - 交给 bus inbound 步骤链执行，按结果直返或入队
         """
-
-        async def _bus_progress(content: str, **metadata) -> None:
-            """把请求级进度镜像成总线 outbound 消息；供 bus 场景下逐步回显。"""
-            outbound = self._runtime.new_outbound_message(
-                channel=message.channel,
-                chat_id=message.chat_id,
-                content=content,
-            )
-            outbound.metadata = {"_progress": True, **metadata}
-            await self._runtime.bus.publish_outbound(outbound)
 
         ctx = InboundContext(
             request_key=request_key,
@@ -87,7 +77,8 @@ class InboundManager:
             content=message.content,
             media=list(message.media),
             metadata=dict(message.metadata or {}),
-            on_progress=_bus_progress,
+            # 总线入站只走 state/router 的结构化 progress 发布，不再额外镜像 on_progress。
+            on_progress=None,
         )
         await self._run_pipeline(ctx, steps=self.bus_inbound_steps())
 

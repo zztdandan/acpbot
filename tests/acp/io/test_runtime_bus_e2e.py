@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 from pathlib import Path
 from uuid import uuid4
 
@@ -10,7 +11,6 @@ import pytest
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.config.loader import get_config_path, set_config_path
 from tests.acp.sessionmap.helpers import (
-    HARNESS_ROOT,
     build_runtime,
     close_runtime_quietly,
     extract_json_object,
@@ -44,6 +44,47 @@ def _unwrap_final_content(content: str) -> str:
     if stripped.startswith("<final>") and stripped.endswith("</final>"):
         return stripped[len("<final>") : -len("</final>")].strip()
     return stripped
+
+
+def _clip_text(content: str, *, limit: int = 180) -> str:
+    """压缩日志文本长度，避免失败信息过长。"""
+
+    stripped = (content or "").strip().replace("\n", "\\n")
+    if len(stripped) <= limit:
+        return stripped
+    return f"{stripped[:limit]}..."
+
+
+def _collect_json_payload_from_outbound_events(
+    events: list[OutboundMessage],
+) -> tuple[dict[str, object] | None, str]:
+    """从 outbound 序列逆序提取最后一个可解析 JSON，并返回调试摘要。"""
+
+    debug_lines: list[str] = []
+    for index, message in enumerate(events):
+        progress_flag = bool(message.metadata.get("_progress"))
+        debug_lines.append(
+            f"[{index}] progress={progress_flag} final={_is_final_payload(message.content)} content={_clip_text(message.content)}"
+        )
+
+    # 实际后端偶发 final 为空，故回退到最近一次可解析 JSON 的 progress/final 文本。
+    for message in reversed(events):
+        candidate = _unwrap_final_content(message.content)
+        if not candidate:
+            continue
+        try:
+            return extract_json_object(candidate), "\n".join(debug_lines)
+        except ValueError:
+            # 部分真实响应会在 JSON 前后附加说明文本，这里做一次宽松抽取兜底。
+            start = candidate.find("{")
+            end = candidate.rfind("}")
+            if start < 0 or end < 0 or start >= end:
+                continue
+            with contextlib.suppress(ValueError):
+                parsed = json.loads(candidate[start : end + 1])
+                if isinstance(parsed, dict):
+                    return parsed, "\n".join(debug_lines)
+    return None, "\n".join(debug_lines)
 
 
 async def _collect_outbound_until_final(
@@ -113,7 +154,12 @@ async def test_runtime_bus_inbound_research_workspace_and_report_snapshot(tmp_pa
         assert final_message.chat_id == inbound.chat_id
         assert _is_final_payload(final_message.content)
 
-        final_payload = extract_json_object(_unwrap_final_content(final_message.content))
+        final_payload, outbound_debug = _collect_json_payload_from_outbound_events(outbound_events)
+        assert final_payload is not None, (
+            "No parseable JSON payload found in outbound events.\n"
+            f"outbound_count={len(outbound_events)}\n"
+            f"{outbound_debug}"
+        )
         model_id = final_payload.get("model_id")
         workspace_path = final_payload.get("workspace_path")
         top_level_entries = final_payload.get("top_level_entries")

@@ -90,3 +90,15 @@ class ThoughtPool(_TextStreamPool):
             outbound_kind=ACPOutboundKind.THOUGHT,
             metadata={"thought": True},
         )
+
+    def flush(self) -> FlushResult | None:
+        """返回尚未镜像的文本快照；无新增时保持静默。"""
+
+        if not self.text or self.text == self._last_flushed_text:
+            return None
+        self._last_flushed_text = self.text
+        return FlushResult(
+            kind=self._outbound_kind,
+            content=self.text,
+            metadata=dict(self._metadata),
+        )
