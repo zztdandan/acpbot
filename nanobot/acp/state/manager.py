@@ -273,6 +273,9 @@ class SessionStateManager:
         """按 request-scope 聚合事实物化最终 outbound；适用于 request 完成或异常回退场景。"""
 
         content = self.request_scope.partial_text if partial else self.request_scope.final_text
+        if not partial:
+            # 统一最终消息协议：所有通道都看到三行 final 包裹结构，避免通道各自拼装。
+            content = self._format_final_content(content)
         return OutboundMessage(
             channel=self.channel,
             chat_id=self.chat_id,
@@ -280,6 +283,15 @@ class SessionStateManager:
             media=list(self.request_scope.media_paths),
             metadata=dict(self.request_scope.final_metadata),
         )
+
+    @staticmethod
+    def _format_final_content(content: str) -> str:
+        """把最终正文统一为 `<final>\n...\n</final>` 三行格式。"""
+
+        stripped = (content or "").strip()
+        if stripped.startswith("<final>") and stripped.endswith("</final>"):
+            stripped = stripped[len("<final>") : -len("</final>")].strip()
+        return f"<final>\n{stripped}\n</final>"
 
     async def close(self) -> None:
         """关闭当前 request state；适用于 request 完成、失败或外部中止后的统一收尾场景。"""

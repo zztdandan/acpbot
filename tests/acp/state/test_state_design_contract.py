@@ -58,6 +58,28 @@ def _build_state_manager(tmp_path: Path) -> SessionStateManager:
     )
 
 
+def test_materialize_final_outbound_wraps_final_tags(tmp_path: Path) -> None:
+    """最终 outbound 必须统一包裹为三行 `<final>` 结构，确保多通道一致。"""
+
+    state_manager = _build_state_manager(tmp_path)
+    state_manager.request_scope.final_text = "hello final"
+
+    outbound = state_manager.materialize_final_outbound(partial=False)
+
+    assert outbound.content == "<final>\nhello final\n</final>"
+
+
+def test_materialize_partial_outbound_keeps_raw_text(tmp_path: Path) -> None:
+    """partial 回退场景保持原始文本，不注入 final 包裹。"""
+
+    state_manager = _build_state_manager(tmp_path)
+    state_manager.request_scope.partial_text = "partial snapshot"
+
+    outbound = state_manager.materialize_final_outbound(partial=True)
+
+    assert outbound.content == "partial snapshot"
+
+
 @pytest.mark.asyncio
 async def test_message_text_only_commits_final_text_on_flush(tmp_path: Path) -> None:
     """文本 chunk 进入池后只更新 partial，final text 必须等到 text pool flush 才提交。"""

@@ -29,6 +29,15 @@ IDLE_COLLECT_SECONDS = 0.05
 COLLECT_TIMEOUT_SECONDS = 1.0
 
 
+def _expected_wrapped_final(content: str) -> str:
+    """测试侧复用 ACP 最终消息协议：三行 `<final>` 包裹。"""
+
+    stripped = (content or "").strip()
+    if stripped.startswith("<final>") and stripped.endswith("</final>"):
+        stripped = stripped[len("<final>") : -len("</final>")].strip()
+    return f"<final>\n{stripped}\n</final>"
+
+
 @dataclass(slots=True)
 class ProgressEnvelope:
     """记录 state flush 到测试侧总线的原始负载。"""
@@ -206,7 +215,7 @@ async def test_state_real_message_updates_assemble_text_and_media(tmp_path: Path
 
         assert_progress_text(progress_events, expected["progressText"])
         assert_progress_media(progress_events, expected["progressMedia"])
-        assert final_outbound.content == expected["final"]["content"]
+        assert final_outbound.content == _expected_wrapped_final(expected["final"]["content"])
         assert final_outbound.media == expected["final"]["media"]
 
 
@@ -253,5 +262,5 @@ async def test_state_real_mixed_updates_match_split_case_union(tmp_path: Path) -
         final_outbound = state_manager.materialize_final_outbound()
 
         assert_tool_hints(progress_events, expected["final"]["toolHints"])
-        assert final_outbound.content == expected["final"]["content"]
+        assert final_outbound.content == _expected_wrapped_final(expected["final"]["content"])
         assert final_outbound.media == expected["final"]["media"]
