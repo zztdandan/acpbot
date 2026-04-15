@@ -46,11 +46,7 @@ class AgentMessageTextHandler(StateUpdateHandler):
         state_manager.update_partial_text(typed_pool.text)
         return HandlerConsumeResult()
 
-    def build_progress_outbound(self, *, state_manager, flush_result):
-        """在文本池 flush 时统一提交 final 文本，再走标准 progress outbound 编制。"""
+    def on_flush_result(self, *, state_manager, flush_result) -> None:
+        """文本池每次 flush 都追加到 final 区，避免跨段文本在收尾时被覆盖丢失。"""
 
-        state_manager.commit_final_text(flush_result.content)
-        return super().build_progress_outbound(
-            state_manager=state_manager,
-            flush_result=flush_result,
-        )
+        state_manager.append_final_text(flush_result.content)

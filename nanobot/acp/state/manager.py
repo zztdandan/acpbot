@@ -167,10 +167,62 @@ class SessionStateManager:
 
         self.request_scope.partial_text = text.strip()
 
-    def commit_final_text(self, text: str) -> None:
-        """提交 request-scope 的最终文本快照；仅应在文本池 flush 时调用。"""
+    def append_final_text(self, text: str) -> None:
+        """把一次文本 flush 结果并入 final 文本区，兼容全量快照与增量片段。"""
 
-        self.request_scope.final_text = text.strip()
+        segment = text.strip()
+        if not segment:
+            return
+        current = self.request_scope.final_text
+        if not current:
+            self.request_scope.final_text = segment
+            return
+        current_spaced = current.replace("\n", " ").strip()
+
+        if segment == current or segment == current_spaced:
+            # 与当前聚合快照等价（仅分隔符不同也算）时忽略。
+            return
+        if current.endswith(segment) or current_spaced.endswith(segment):
+            # segment 已被 final 覆盖（同一快照重放或旧尾段回放）时不重复追加。
+            return
+        if segment.startswith(current):
+            # 上游把全量快照重新发送时，仅并入新增尾段。
+            delta = segment[len(current) :].strip()
+            if not delta:
+                return
+            self.request_scope.final_text = f"{current}\n{delta}"
+            return
+        if current_spaced and segment.startswith(current_spaced):
+            # 已写入 final 的段间换行会破坏前缀匹配，这里按空格等价值再做一轮判定。
+            delta = segment[len(current_spaced) :].strip()
+            if not delta:
+                return
+            self.request_scope.final_text = f"{current}\n{delta}"
+            return
+
+        overlap = max(
+            self._suffix_prefix_overlap(current, segment),
+            self._suffix_prefix_overlap(current_spaced, segment),
+        )
+        if overlap > 0:
+            delta = segment[overlap:].strip()
+            if not delta:
+                return
+            self.request_scope.final_text = f"{current}\n{delta}"
+            return
+
+        # 无重叠时按新段追加，段间保持一个换行。
+        self.request_scope.final_text = f"{current}\n{segment}"
+
+    @staticmethod
+    def _suffix_prefix_overlap(left: str, right: str) -> int:
+        """返回 `left` 后缀与 `right` 前缀的最大重叠长度。"""
+
+        max_len = min(len(left), len(right))
+        for size in range(max_len, 0, -1):
+            if left[-size:] == right[:size]:
+                return size
+        return 0
 
     def append_media_path(self, media_path: str) -> None:
         """把消息媒体路径写入 request-scope 聚合；当前 state 明确忽略 tool 媒体。"""
@@ -285,7 +337,11 @@ class SessionStateManager:
     def materialize_final_outbound(self, *, partial: bool = False) -> OutboundMessage:
         """按 request-scope 聚合事实物化最终 outbound；适用于 request 完成或异常回退场景。"""
 
-        content = self.request_scope.partial_text if partial else self.request_scope.final_text
+        if partial:
+            content = self.request_scope.partial_text
+        else:
+            # final 区意外为空时回退 partial，避免最后响应丢正文。
+            content = self.request_scope.final_text or self.request_scope.partial_text
         if not partial:
             # 统一最终消息协议：所有通道都看到三行 final 包裹结构，避免通道各自拼装。
             content = self._format_final_content(content)

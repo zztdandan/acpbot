@@ -7,8 +7,14 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, cast
 
 from nanobot.acp.contracts import JSONMap, JSONValue
-from nanobot.acp.state.models import ACPBucketType, ACPPool, ACPUpdateType, FlushResult, PoolKey
-from nanobot.acp.state.outbound_schema import build_progress_outbound
+from nanobot.acp.state.models import (
+    ACPBucketType,
+    ACPOutboundKind,
+    ACPPool,
+    ACPUpdateType,
+    FlushResult,
+    PoolKey,
+)
 from nanobot.bus.events import OutboundMessage
 
 if TYPE_CHECKING:
@@ -62,11 +68,32 @@ class StateUpdateHandler(ABC):
     ) -> OutboundMessage | None:
         """把一次 flush 结果编制成 progress outbound；默认走 state 公共出包规则。"""
 
-        return build_progress_outbound(
+        metadata = dict(flush_result.metadata)
+        kind_value = flush_result.kind.value
+        # 统一在出包层补齐语义字段，避免各个 pool/handler 分散维护。
+        # 允许 pool 在 flush metadata 中显式指定 kind/render_as；这里仅做兜底补齐。
+        metadata.setdefault("kind", kind_value)
+        metadata.setdefault("render_as", kind_value)
+        if flush_result.kind == ACPOutboundKind.TOOL:
+            metadata.setdefault("_tool_hint", True)
+        metadata.setdefault("_acp_progress", True)
+        return OutboundMessage(
             channel=state_manager.channel,
             chat_id=state_manager.chat_id,
-            result=flush_result,
+            content=flush_result.content,
+            media=list(flush_result.media),
+            metadata=metadata,
         )
+
+    def on_flush_result(
+        self,
+        *,
+        state_manager: SessionStateManager,
+        flush_result: FlushResult,
+    ) -> None:
+        """处理一次 flush 产物的 request-scope 副作用；默认不做额外处理。"""
+
+        del state_manager, flush_result
 
     def on_deadhand(self, *, state_manager: SessionStateManager, pool: ACPPool) -> None:
         """死手触发回调；默认无需额外动作，权限类处理器可按需覆盖。"""
@@ -85,6 +112,7 @@ class StateUpdateHandler(ABC):
         flush_result = pool.flush()
         if flush_result is None:
             return None
+        self.on_flush_result(state_manager=state_manager, flush_result=flush_result)
         return self.build_progress_outbound(
             state_manager=state_manager,
             flush_result=flush_result,

@@ -41,16 +41,12 @@ def test_tool_pool_flushes_last_message_with_previous_history() -> None:
     result = pool.flush()
 
     assert result is not None
-    assert result.content == "Read config [completed]"
-    assert result.metadata["previous"] == ["Read config [pending]", "Read config [in_progress]"]
+    assert result.content == "[tool]Read config[completed]"
+    assert result.metadata["previous"] == [
+        "[tool]Read config[pending]",
+        "[tool]Read config[in_progress]",
+    ]
     assert result.metadata["status"] == "completed"
-    assert result.metadata["tool_event"] == {
-        "sessionUpdate": "tool_call_update",
-        "toolCallId": "demo",
-        "title": "Read config",
-        "status": "completed",
-        "rawOutput": {"ok": True},
-    }
     assert result.metadata["tool_snapshot"] == {
         "sessionUpdate": "tool_call_update",
         "toolCallId": "demo",
@@ -59,6 +55,8 @@ def test_tool_pool_flushes_last_message_with_previous_history() -> None:
         "rawInput": {"path": "/tmp/config.json"},
         "rawOutput": {"ok": True},
     }
+    assert "tool_event" not in result.metadata
+    assert "tool_events_previous" not in result.metadata
 
 
 def test_tool_pool_timeout_appends_timeout_message() -> None:
@@ -86,10 +84,13 @@ def test_tool_pool_timeout_appends_timeout_message() -> None:
     result = pool.flush()
 
     assert result is not None
-    assert result.content == "Read config [timeout]"
-    assert result.metadata["previous"] == ["Read config [pending]", "Read config [in_progress]"]
+    assert result.content == "[tool]Read config[timeout]"
+    assert result.metadata["previous"] == [
+        "[tool]Read config[pending]",
+        "[tool]Read config[in_progress]",
+    ]
     assert result.metadata["status"] == "timeout"
-    event = cast(JSONMap, result.metadata["tool_event"])
     snapshot = cast(JSONMap, result.metadata["tool_snapshot"])
-    assert event["status"] == "timeout"
     assert snapshot["status"] == "timeout"
+    assert "tool_event" not in result.metadata
+    assert "tool_events_previous" not in result.metadata

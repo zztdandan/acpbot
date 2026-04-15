@@ -83,6 +83,12 @@ class ToolPool(ACPPoolBase):
 
     bucket_type = ACPBucketType.TOOL
     idle_timeout_seconds: float | None = 300.0
+    # 渲染模板由片段顺序与包裹符组成，后续改展示样式时只需改这里。
+    RENDER_PARTS: ClassVar[tuple[tuple[str, str, str], ...]] = (
+        ("kind", "[", "]"),
+        ("title", "", ""),
+        ("status", "[", "]"),
+    )
 
     def __init__(self, *, bucket_key: str) -> None:
         """建立工具池；每个 `tool:<tool_call_id>` 独立一份实例，死手时间固定为 300 秒。"""
@@ -97,7 +103,7 @@ class ToolPool(ACPPoolBase):
         self._dirty = False
 
     def _accept(self, payload: object) -> bool:
-        """写入一条工具事件；保持结构化字段并维护 `title + status` 渲染文本。"""
+        """写入一条工具事件；保持结构化字段并维护统一模板渲染文本。"""
 
         if not isinstance(payload, ToolPoolPayload):
             return False
@@ -109,9 +115,8 @@ class ToolPool(ACPPoolBase):
             consumed = True
 
         self._merge_snapshot(payload)
-        current_title = self._snapshot.title if self._snapshot is not None else payload.title
-        current_status = self._snapshot.status if self._snapshot is not None else payload.status
-        rendered = self._render_content(title=current_title, status=current_status)
+        rendered_payload = self._snapshot if self._snapshot is not None else payload
+        rendered = self._render_content(rendered_payload)
         if not rendered:
             return consumed
         message = rendered.strip()
@@ -127,7 +132,7 @@ class ToolPool(ACPPoolBase):
         return consumed
 
     def flush(self) -> FlushResult | None:
-        """输出 `title + status` 文本，并在 metadata 中保留完整结构化事件与快照。"""
+        """输出统一文本，并在 metadata 中保留历史文本与最新结构化快照。"""
 
         if not self._dirty or not self._messages:
             return None
@@ -139,13 +144,6 @@ class ToolPool(ACPPoolBase):
             metadata["previous"] = previous_values
         if self._status:
             metadata["status"] = self._status
-        if self._events:
-            metadata["tool_event"] = cast(JSONValue, self._build_event_map(self._events[-1]))
-            if len(self._events) > 1:
-                metadata["tool_events_previous"] = cast(
-                    JSONValue,
-                    [self._build_event_map(event) for event in self._events[:-1]],
-                )
         if self._snapshot is not None:
             metadata["tool_snapshot"] = cast(JSONValue, self._build_event_map(self._snapshot))
         return FlushResult(
@@ -172,18 +170,27 @@ class ToolPool(ACPPoolBase):
             return bucket_key.split(":", 1)[1] or "unknown"
         return "unknown"
 
-    @staticmethod
-    def _render_content(*, title: str | None, status: str | None) -> str:
-        """统一进度文本：正文以 `title` 为主，状态仅做轻量补充。"""
+    def _render_content(self, payload: ToolPoolPayload) -> str:
+        """根据 payload 渲染文本，默认格式为 `[kind]title[status]`。"""
 
-        clean_title = (title or "").strip()
-        clean_status = (status or "").strip()
-        if clean_title and clean_status:
-            return f"{clean_title} [{clean_status}]"
-        if clean_title:
-            return clean_title
-        if clean_status:
-            return f"tool [{clean_status}]"
+        kind = (payload.kind or "tool").strip() or "tool"
+        title = (payload.title or "").strip() or "tool progress"
+        status = (payload.status or "").strip()
+        render_values: JSONMap = {
+            "kind": kind,
+            "title": title,
+            "status": status,
+        }
+
+        rendered_parts: list[str] = []
+        for key, prefix, suffix in self.RENDER_PARTS:
+            value = cast(str, render_values.get(key) or "").strip()
+            if not value:
+                continue
+            rendered_parts.append(f"{prefix}{value}{suffix}")
+
+        if rendered_parts:
+            return "".join(rendered_parts)
         return "tool progress"
 
     @staticmethod

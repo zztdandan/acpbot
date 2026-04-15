@@ -102,6 +102,62 @@ async def test_message_text_only_commits_final_text_on_flush(tmp_path: Path) -> 
     assert state_manager.request_scope.final_text == "hello world"
 
 
+def test_append_final_text_uses_newline_between_segments(tmp_path: Path) -> None:
+    """无重叠片段按段追加，段间固定一个换行。"""
+
+    state_manager = _build_state_manager(tmp_path)
+
+    state_manager.append_final_text("first segment")
+    state_manager.append_final_text("second segment")
+
+    assert state_manager.request_scope.final_text == "first segment\nsecond segment"
+
+
+def test_append_final_text_keeps_only_snapshot_delta(tmp_path: Path) -> None:
+    """当上游重复发送全量快照时，只并入新增尾段，避免全文重复。"""
+
+    state_manager = _build_state_manager(tmp_path)
+
+    state_manager.append_final_text("hello")
+    state_manager.append_final_text("hello world")
+    state_manager.append_final_text("hello world")
+
+    assert state_manager.request_scope.final_text == "hello\nworld"
+
+
+def test_append_final_text_merges_suffix_prefix_overlap(tmp_path: Path) -> None:
+    """半重叠场景应根据后缀/前缀重叠长度仅追加真实新增部分。"""
+
+    state_manager = _build_state_manager(tmp_path)
+
+    state_manager.append_final_text("alpha beta")
+    state_manager.append_final_text("beta gamma")
+
+    assert state_manager.request_scope.final_text == "alpha beta\ngamma"
+
+
+def test_append_final_text_ignores_tail_replay(tmp_path: Path) -> None:
+    """旧尾段重放不应重复写入 final，避免跨 flush 回放污染。"""
+
+    state_manager = _build_state_manager(tmp_path)
+
+    state_manager.append_final_text("one\ntwo")
+    state_manager.append_final_text("two")
+
+    assert state_manager.request_scope.final_text == "one\ntwo"
+
+
+def test_materialize_final_outbound_falls_back_to_partial_when_final_empty(tmp_path: Path) -> None:
+    """final 区为空时，最终物化必须回退 partial，避免最终消息正文丢失。"""
+
+    state_manager = _build_state_manager(tmp_path)
+    state_manager.request_scope.partial_text = "fallback partial"
+
+    outbound = state_manager.materialize_final_outbound(partial=False)
+
+    assert outbound.content == "<final>\nfallback partial\n</final>"
+
+
 @pytest.mark.asyncio
 async def test_permission_reply_finalizes_permission_pool_via_router(tmp_path: Path) -> None:
     """permission request/reply 应由 router 协调，并在 reply 命中后立即摘除 permission pool。"""

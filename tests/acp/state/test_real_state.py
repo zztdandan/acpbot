@@ -11,7 +11,6 @@ import pytest
 from acp.schema import SessionNotification
 
 from nanobot.acp.state.manager import SessionStateManager
-from nanobot.acp.state.outbound_schema import build_progress_payload
 from nanobot.acp.state.router import ProgressRouter
 from nanobot.config.loader import get_config_path, set_config_path
 from tests.acp.sessionmap.helpers import (
@@ -62,15 +61,18 @@ class RecordingProgressRouter(ProgressRouter):
     async def publish_progress_flush(self, *, flushed_handler, flush_result) -> None:  # type: ignore[override]
         if self._closed:
             return
-        content, metadata, media = build_progress_payload(flush_result)
-        await self._queue.put(
-            ProgressEnvelope(content=content, metadata=dict(metadata), media=list(media))
-        )
         outbound = flushed_handler.build_progress_outbound(
             state_manager=self._state_manager,
             flush_result=flush_result,
         )
         if outbound is not None:
+            await self._queue.put(
+                ProgressEnvelope(
+                    content=outbound.content,
+                    metadata=dict(outbound.metadata),
+                    media=list(outbound.media),
+                )
+            )
             await self._state_manager.state_publish_progress_outbound(outbound=outbound)
 
 

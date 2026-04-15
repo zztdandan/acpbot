@@ -155,6 +155,10 @@ class ProgressRouter:
 
         if self._closed:
             return
+        flushed_handler.on_flush_result(
+            state_manager=self._state_manager,
+            flush_result=flush_result,
+        )
         outbound = flushed_handler.build_progress_outbound(
             state_manager=self._state_manager,
             flush_result=flush_result,
