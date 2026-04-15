@@ -75,8 +75,10 @@ class StateUpdateHandler(ABC):
         metadata.setdefault("kind", kind_value)
         metadata.setdefault("render_as", kind_value)
         if flush_result.kind == ACPOutboundKind.TOOL:
+        # 使用统一 tool_hint约定字段，用于在各种场合下标注这个消息是工具
             metadata.setdefault("_tool_hint", True)
-        metadata.setdefault("_acp_progress", True)
+        # 统一使用历史约定字段 `_progress`，让各 channel 正确识别 progress 帧。
+        metadata.setdefault("_progress", True)
         return OutboundMessage(
             channel=state_manager.channel,
             chat_id=state_manager.chat_id,

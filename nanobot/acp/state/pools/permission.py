@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from nanobot.acp.contracts import JSONMap
 from nanobot.acp.state.models import ACPBucketType, ACPOutboundKind, FlushResult
 from nanobot.acp.state.pools.base import ACPPoolBase
 
@@ -18,6 +19,12 @@ class PermissionPool(ACPPoolBase):
         super().__init__(bucket_key=bucket_key)
         self.prompt = ""
         self._dirty = False
+        self._metadata: JSONMap = {}
+
+    def update_metadata(self, *, metadata: JSONMap) -> None:
+        """更新下一次 flush 的 metadata；供 handler 注入 request/reply 渲染信息。"""
+
+        self._metadata = dict(metadata)
 
     def _accept(self, payload: object) -> bool:
         """更新当前权限提示文本；仅保留最近一次提示。"""
@@ -37,4 +44,6 @@ class PermissionPool(ACPPoolBase):
         if not self._dirty or not self.prompt:
             return None
         self._dirty = False
-        return FlushResult(kind=ACPOutboundKind.PERMISSION, content=self.prompt)
+        metadata: JSONMap = dict(self._metadata)
+        self._metadata.clear()
+        return FlushResult(kind=ACPOutboundKind.PERMISSION, content=self.prompt, metadata=metadata)

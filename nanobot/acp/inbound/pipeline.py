@@ -6,12 +6,34 @@ from typing import TYPE_CHECKING, Awaitable, Callable
 
 from nanobot.acp.inbound.media import build_media_artifacts
 from nanobot.acp.runtime_models import InboundContext, ProcessRequest
+from nanobot.bus.events import OutboundMessage
 
 if TYPE_CHECKING:
     from nanobot.acp.inbound.command_router import CommandRouter
     from nanobot.acp.runtime import ACPRuntime
 
 InboundStep = Callable[[InboundContext], Awaitable[None]]
+
+
+def _build_permission_direct_response(
+    *,
+    runtime: ACPRuntime,
+    channel: str,
+    chat_id: str,
+    content: str,
+    permission_request_id: str | None,
+    render_as: str,
+) -> OutboundMessage:
+    """构造权限直返消息，统一补齐 permission 渲染 metadata。"""
+
+    outbound = runtime.new_outbound_message(channel=channel, chat_id=chat_id, content=content)
+    outbound.metadata = {
+        "render_as": render_as,
+        "kind": "permission",
+        "_progress": True,
+        "permission_request_id": permission_request_id or "",
+    }
+    return outbound
 
 
 def _looks_like_permission_reply_text(content: str) -> bool:
@@ -52,17 +74,24 @@ def build_permission_inbound_step(runtime: ACPRuntime) -> InboundStep:
             nanobot_side_session_key=ctx.nanobot_side_session_key,
         )
         if active_entry is None:
-            ctx.direct_response = runtime.new_outbound_message(
+            ctx.direct_response = _build_permission_direct_response(
+                runtime=runtime,
                 channel=ctx.channel,
                 chat_id=ctx.chat_id,
                 content="No pending permission request.",
+                permission_request_id=None,
+                render_as="permission_reply",
             )
             return
-        await active_entry.progress_router.handle_permission_reply(reply_text=ctx.content)
-        ctx.direct_response = runtime.new_outbound_message(
+        result = await active_entry.progress_router.handle_permission_reply(reply_text=ctx.content)
+        content = "Permission accepted." if result.accepted else result.message
+        ctx.direct_response = _build_permission_direct_response(
+            runtime=runtime,
             channel=ctx.channel,
             chat_id=ctx.chat_id,
-            content="Permission accepted.",
+            content=content,
+            permission_request_id=result.permission_request_id,
+            render_as="permission_reply",
         )
 
     return _permission_inbound

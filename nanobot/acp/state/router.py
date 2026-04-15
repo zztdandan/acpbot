@@ -14,7 +14,11 @@ from nanobot.acp.contracts import (
 from nanobot.acp.state.handlers import StateUpdateHandler, build_default_handlers
 from nanobot.acp.state.models import PoolKey
 from nanobot.acp.state.permission_coordinator import PermissionCoordinator
-from nanobot.acp.state.permission_events import PermissionReplyEvent, PermissionRequestEvent
+from nanobot.acp.state.permission_events import (
+    PermissionReplyEvent,
+    PermissionReplyHandleResult,
+    PermissionRequestEvent,
+)
 
 if TYPE_CHECKING:
     from nanobot.acp.state.manager import SessionStateManager
@@ -66,16 +70,35 @@ class ProgressRouter:
 
         return self._permission_coordinator.looks_like_permission_reply(reply_text)
 
-    async def handle_permission_reply(self, *, reply_text: str) -> str:
-        """消费一条权限回复文本；命中时把 reply 事件送入统一 handler/pool/router 主链。"""
+    async def handle_permission_reply(self, *, reply_text: str) -> PermissionReplyHandleResult:
+        """消费一条权限回复文本；返回结构化结果供 inbound 构造统一直返消息。"""
 
         if not self._permission_coordinator.has_pending_permission():
             await self._permission_coordinator.emit_permission_reply_not_found()
-            return "No pending permission request for this session."
+            return PermissionReplyHandleResult(
+                accepted=False,
+                reason="not_found",
+                message="No pending permission request for this session.",
+                permission_request_id=None,
+            )
+        permission_request_id = self._permission_coordinator.current_request_id()
         await self.handle_update(PermissionReplyEvent(reply_text=reply_text))
         if self._permission_coordinator.has_pending_permission():
-            return "Permission reply not understood. Reply with /permission <number>."
-        return "Permission reply received."
+            return PermissionReplyHandleResult(
+                accepted=False,
+                reason="invalid_reply",
+                message=(
+                    "Permission reply not understood. "
+                    "Reply with /permission <request_id>:<number|option_choice>."
+                ),
+                permission_request_id=permission_request_id,
+            )
+        return PermissionReplyHandleResult(
+            accepted=True,
+            reason="accepted",
+            message="Permission reply received.",
+            permission_request_id=permission_request_id,
+        )
 
     async def handle_permission_request(
         self,

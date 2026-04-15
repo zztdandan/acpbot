@@ -18,6 +18,7 @@ class PendingPermissionRequest:
 
     options: list[ACPPermissionOption]  # 当前权限请求可供用户选择的全部选项。
     tool_call: ACPToolCall | None = None  # 触发本次权限等待的工具调用上下文，可为空。
+    request_id: str | None = None  # 前端可回填的权限请求标识（优先使用 tool_call_id）。
     prompt_text: str = ""  # 已渲染的提示文本；供 on_progress 与直接回显复用。
 
 
@@ -33,3 +34,13 @@ class PermissionReplyEvent:
     """权限回复事件：承载用户原始回复文本，交由 permission handler 消费。"""
 
     reply_text: str  # 用户回复的原始文本。
+
+
+@dataclass(slots=True)
+class PermissionReplyHandleResult:
+    """权限回复处理结果：供 inbound 生成统一 direct response。"""
+
+    accepted: bool
+    reason: str
+    message: str
+    permission_request_id: str | None = None

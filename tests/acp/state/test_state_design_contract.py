@@ -177,19 +177,56 @@ async def test_permission_reply_finalizes_permission_pool_via_router(tmp_path: P
     permission_key = PoolKey(bucket_type=ACPBucketType.PERMISSION, bucket_key="permission")
 
     request_task = asyncio.create_task(
-        router.handle_permission_request(options=[allow_once, cancelled])
+        router.handle_permission_request(
+            options=[allow_once, cancelled],
+            tool_call=SimpleNamespace(toolCallId="call-perm-001"),
+        )
     )
     await asyncio.sleep(0)
 
     assert router.has_pending_permission() is True
     assert state_manager.get_pool_entry(permission_key) is not None
 
-    ack = await router.handle_permission_reply(reply_text="/permission 1")
+    ack = await router.handle_permission_reply(reply_text="/permission call-perm-001:1")
     response = cast(Any, await request_task)
 
-    assert ack == "Permission reply received."
+    assert ack.accepted is True
+    assert ack.reason == "accepted"
+    assert ack.permission_request_id == "call-perm-001"
     assert router.has_pending_permission() is False
     assert state_manager.get_pool_entry(permission_key) is None
     assert (
         response.model_dump(by_alias=True, exclude_none=True)["outcome"]["optionId"] == "allow-once"
     )
+
+
+@pytest.mark.asyncio
+async def test_permission_reply_with_mismatched_request_id_is_rejected(tmp_path: Path) -> None:
+    """当 reply 携带 request_id 且不匹配时，router 必须拒绝并保持 waiter 挂起。"""
+
+    state_manager = _build_state_manager(tmp_path)
+    router = state_manager.progress_router
+    allow_once = SimpleNamespace(
+        option_id="allow-once",
+        kind=SimpleNamespace(value="allow_once"),
+        label="Allow once",
+    )
+
+    request_task = asyncio.create_task(
+        router.handle_permission_request(
+            options=[allow_once],
+            tool_call=SimpleNamespace(toolCallId="call-perm-expected"),
+        )
+    )
+    await asyncio.sleep(0)
+
+    ack = await router.handle_permission_reply(reply_text="/permission call-perm-other:1")
+
+    assert ack.accepted is False
+    assert ack.reason == "invalid_reply"
+    assert ack.permission_request_id == "call-perm-expected"
+    assert router.has_pending_permission() is True
+
+    # 用正确 request_id 收尾，避免挂起任务泄漏。
+    await router.handle_permission_reply(reply_text="/permission call-perm-expected:1")
+    await request_task

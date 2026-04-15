@@ -50,11 +50,13 @@ class PermissionCoordinator:
         """建立新的权限等待态，并返回供 permission handler 使用的请求事件。"""
 
         loop = asyncio.get_running_loop()
+        request_id = self._extract_tool_call_id(tool_call)
         self._pending_future = loop.create_future()
         self._pending_request = PendingPermissionRequest(
             options=list(options),
             tool_call=tool_call,
-            prompt_text=self.render_prompt(options),
+            request_id=request_id,
+            prompt_text=self.render_prompt(options, request_id=request_id),
         )
         return self._pending_request
 
@@ -76,20 +78,29 @@ class PermissionCoordinator:
 
         return self._pending_future is not None and not self._pending_future.done()
 
+    def current_request_id(self) -> str | None:
+        """返回当前 pending permission 的 request_id；无等待态时返回 None。"""
+
+        request = self._pending_request
+        return request.request_id if request is not None else None
+
     def looks_like_permission_reply(self, reply_text: str) -> bool:
         """判断一条文本是否像当前权限回复；用于 inbound 的轻量筛选。"""
 
         request = self._pending_request
         if request is None:
             return False
-        normalized = reply_text.strip()
-        if normalized.startswith("/permission "):
-            normalized = normalized[len("/permission ") :]
-        elif normalized.startswith("permission "):
-            normalized = normalized[len("permission ") :]
-        else:
+        parsed = self._parse_permission_reply(reply_text)
+        if parsed is None:
             return False
-        return self.select_option(request.options, normalized) is not None
+        request_id, selected = parsed
+        if (
+            request_id is not None
+            and request.request_id is not None
+            and request_id != request.request_id
+        ):
+            return False
+        return self.select_option(request.options, selected) is not None
 
     def resolve_permission_reply(self, reply_text: str) -> str:
         """解析并消费权限回复；供 `PermissionHandler` 在 consume 主链中调用。"""
@@ -98,12 +109,17 @@ class PermissionCoordinator:
         request = self._pending_request
         if future is None or future.done() or request is None:
             return "not_found"
-        normalized_reply = reply_text.strip()
-        if normalized_reply.startswith("/permission "):
-            normalized_reply = normalized_reply[len("/permission ") :]
-        elif normalized_reply.startswith("permission "):
-            normalized_reply = normalized_reply[len("permission ") :]
-        option_id = self.select_option(request.options, normalized_reply)
+        parsed = self._parse_permission_reply(reply_text)
+        if parsed is None:
+            return "invalid"
+        request_id, selected = parsed
+        if (
+            request_id is not None
+            and request.request_id is not None
+            and request_id != request.request_id
+        ):
+            return "invalid"
+        option_id = self.select_option(request.options, selected)
         if option_id is None:
             return "invalid"
         future.set_result(option_id)
@@ -144,10 +160,17 @@ class PermissionCoordinator:
         )
 
     @staticmethod
-    def render_prompt(options: list[ACPPermissionOption]) -> str:
+    def render_prompt(options: list[ACPPermissionOption], request_id: str | None = None) -> str:
         """把权限选项渲染成用户可回复的提示文案。"""
 
-        lines = ["ACP requires permission. Reply with /permission <number>: <options>"]
+        if request_id:
+            lines = [
+                "ACP is asking for permission. "
+                "Please reply with /permission <request_id>:<number|option_choice>.",
+                f"request_id={request_id}",
+            ]
+        else:
+            lines = ["ACP is asking for permission. Reply with /permission <number|option_choice>."]
         for index, option in enumerate(options, start=1):
             kind = getattr(
                 getattr(option, "kind", None), "value", getattr(option, "kind", "option")
@@ -155,6 +178,47 @@ class PermissionCoordinator:
             label = getattr(option, "label", None) or getattr(option, "title", None) or kind
             lines.append(f"{index}. {label}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _extract_tool_call_id(tool_call: ACPToolCall | None) -> str | None:
+        """从 ACP tool_call 里提取稳定 request_id（优先 toolCallId/tool_call_id）。"""
+
+        if tool_call is None:
+            return None
+        if isinstance(tool_call, dict):
+            for key in ("toolCallId", "tool_call_id", "request_id", "id"):
+                value = tool_call.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+            return None
+        for attr in ("toolCallId", "tool_call_id", "request_id", "id"):
+            value = getattr(tool_call, attr, None)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
+    @staticmethod
+    def _parse_permission_reply(reply_text: str) -> tuple[str | None, str] | None:
+        """解析 `/permission` 文本，支持 `<number>` 与 `<request_id>:<choice>` 两种格式。"""
+
+        normalized = reply_text.strip()
+        lowered = normalized.lower()
+        if lowered.startswith("/permission "):
+            body = normalized[len("/permission ") :].strip()
+        elif lowered.startswith("permission "):
+            body = normalized[len("permission ") :].strip()
+        else:
+            return None
+        if not body:
+            return None
+        if ":" in body:
+            request_id, selected = body.split(":", 1)
+            request_id = request_id.strip()
+            selected = selected.strip()
+            if not request_id or not selected:
+                return None
+            return request_id, selected
+        return None, body
 
     @staticmethod
     def select_option(options: list[ACPPermissionOption], reply_text: str) -> str | None:

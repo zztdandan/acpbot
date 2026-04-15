@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import cast
 
+from nanobot.acp.contracts import JSONMap
 from nanobot.acp.state.handlers.base import HandlerConsumeResult, StateUpdateHandler
 from nanobot.acp.state.models import ACPBucketType, ACPOutboundKind, ACPUpdateType, FlushResult
 from nanobot.acp.state.permission_coordinator import PermissionCoordinator
@@ -43,45 +44,88 @@ class PermissionHandler(StateUpdateHandler):
         if isinstance(update, PermissionRequestEvent):
             # 必须先写池，确保 permission 池启动 deadhand 计时；随后再即时上发提示。
             typed_pool.accept(update.pending_request.prompt_text)
+            request_id = update.pending_request.request_id or ""
+            metadata = cast(
+                JSONMap,
+                {
+                    "render_as": "permission_request",
+                    "kind": "permission",
+                    "_progress": True,
+                    "permission_request_id": request_id,
+                },
+            )
+            typed_pool.update_metadata(metadata=metadata)
             outbound = self.build_progress_outbound(
                 state_manager=state_manager,
                 flush_result=FlushResult(
                     kind=ACPOutboundKind.PERMISSION,
                     content=update.pending_request.prompt_text,
+                    metadata=metadata,
                 ),
             )
             if outbound is not None:
                 state_manager.schedule_progress_outbound(outbound=outbound)
             return HandlerConsumeResult()
-
-        typed_update = cast(PermissionReplyEvent, update)
-        resolved = typed_coordinator.resolve_permission_reply(typed_update.reply_text)
-        if resolved == "not_found":
-            return HandlerConsumeResult()
-        if resolved == "invalid":
-            return HandlerConsumeResult()
-        normalized_reply = typed_update.reply_text.strip()
-        if normalized_reply:
-            # 把原始 reply 文本完整写入池，便于 flush metadata/文本保留更丰富上下文。
-            typed_pool.accept(f"Permission reply: {normalized_reply}")
-        else:
-            typed_pool.accept("Permission reply: <empty>")
-        typed_pool.mark_terminal()
-        return HandlerConsumeResult(immediate_finalize=True)
+        if isinstance(update, PermissionReplyEvent):
+            typed_update = cast(PermissionReplyEvent, update)
+            request_id = typed_coordinator.current_request_id() or ""
+            resolved = typed_coordinator.resolve_permission_reply(typed_update.reply_text)
+            if resolved == "not_found":
+                return HandlerConsumeResult()
+            if resolved == "invalid":
+                return HandlerConsumeResult()
+            normalized_reply = typed_update.reply_text.strip()
+            if normalized_reply:
+                # 把原始 reply 文本完整写入池，便于 flush metadata/文本保留更丰富上下文。
+                typed_pool.accept(f"Permission reply: {normalized_reply}")
+            else:
+                typed_pool.accept("Permission reply: <empty>")
+            typed_pool.update_metadata(
+                metadata=cast(
+                    JSONMap,
+                    {
+                        "render_as": "permission_reply",
+                        "kind": "permission",
+                        "_progress": True,
+                        "permission_request_id": request_id,
+                    },
+                )
+            )
+            typed_pool.mark_terminal()
+            return HandlerConsumeResult(immediate_finalize=True)
+        return HandlerConsumeResult()
 
     def do_deadhand_operate_and_build_progress_outbound(self, *, state_manager, pool):
         """permission 死手到点后自动拒绝并同步上发一条超时通知。"""
 
         typed_coordinator = cast(PermissionCoordinator, state_manager.permission_coordinator)
         typed_pool = cast(PermissionPool, pool)
+        request_id = typed_coordinator.current_request_id() or ""
         typed_coordinator.trigger_timeout()
         typed_pool.accept("Permission request timed out and was automatically rejected.")
+        typed_pool.update_metadata(
+            metadata=cast(
+                JSONMap,
+                {
+                    "render_as": "permission_reply",
+                    "kind": "permission",
+                    "_progress": True,
+                    "permission_request_id": request_id,
+                },
+            )
+        )
         cast(ACPPoolBase, typed_pool).mark_terminal()
         flush_result = typed_pool.flush()
         if flush_result is None:
             flush_result = FlushResult(
                 kind=ACPOutboundKind.PERMISSION,
                 content="Permission request timed out and was automatically rejected.",
+                metadata={
+                    "render_as": "permission_reply",
+                    "kind": "permission",
+                    "_progress": True,
+                    "permission_request_id": request_id,
+                },
             )
         return self.build_progress_outbound(
             state_manager=state_manager,
