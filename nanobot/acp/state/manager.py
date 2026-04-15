@@ -215,8 +215,9 @@ class SessionStateManager:
         if not outbound.content or self.on_progress is None:
             return
         callback_kwargs: dict[str, object] = {}
-        if outbound.metadata.get("tool_hint") is not None:
-            callback_kwargs["tool_hint"] = outbound.metadata["tool_hint"]
+        if outbound.metadata.get("_tool_hint") is not None:
+            # on_progress 兼容签名仍使用 tool_hint 参数名，但事实源统一为 _tool_hint。
+            callback_kwargs["tool_hint"] = outbound.metadata["_tool_hint"]
         if outbound.metadata.get("tool_event") is not None:
             callback_kwargs["tool_event"] = outbound.metadata["tool_event"]
         callback = cast(Any, self.on_progress)

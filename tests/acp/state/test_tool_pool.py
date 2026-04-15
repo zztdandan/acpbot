@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import cast
 
 from nanobot.acp.contracts import JSONMap
-from nanobot.acp.state.pools.tool import ToolPool, ToolPoolPayload
+from nanobot.acp.state.pools.tool import ToolPool, ToolPoolPayload, ToolRuntimeStatus
 
 
 def test_tool_pool_flushes_last_message_with_previous_history() -> None:
@@ -15,7 +15,7 @@ def test_tool_pool_flushes_last_message_with_previous_history() -> None:
             session_update="tool_call",
             tool_call_id="demo",
             title="Read config",
-            status="pending",
+            status=ToolRuntimeStatus.PENDING,
             raw_input={"path": "/tmp/config.json"},
         )
     )
@@ -24,7 +24,7 @@ def test_tool_pool_flushes_last_message_with_previous_history() -> None:
             session_update="tool_call_update",
             tool_call_id="demo",
             title="Read config",
-            status="in_progress",
+            status=ToolRuntimeStatus.IN_PROGRESS,
             raw_output={"lines": 10},
         )
     )
@@ -33,7 +33,7 @@ def test_tool_pool_flushes_last_message_with_previous_history() -> None:
             session_update="tool_call_update",
             tool_call_id="demo",
             title="Read config",
-            status="completed",
+            status=ToolRuntimeStatus.COMPLETED,
             raw_output={"ok": True},
         )
     )
@@ -70,7 +70,7 @@ def test_tool_pool_timeout_appends_timeout_message() -> None:
             session_update="tool_call",
             tool_call_id="demo",
             title="Read config",
-            status="pending",
+            status=ToolRuntimeStatus.PENDING,
         )
     )
     pool.accept(
@@ -78,7 +78,7 @@ def test_tool_pool_timeout_appends_timeout_message() -> None:
             session_update="tool_call_update",
             tool_call_id="demo",
             title="Read config",
-            status="in_progress",
+            status=ToolRuntimeStatus.IN_PROGRESS,
         )
     )
 
@@ -86,10 +86,10 @@ def test_tool_pool_timeout_appends_timeout_message() -> None:
     result = pool.flush()
 
     assert result is not None
-    assert result.content == "Read config [timed_out]"
+    assert result.content == "Read config [timeout]"
     assert result.metadata["previous"] == ["Read config [pending]", "Read config [in_progress]"]
-    assert result.metadata["status"] == "timed_out"
+    assert result.metadata["status"] == "timeout"
     event = cast(JSONMap, result.metadata["tool_event"])
     snapshot = cast(JSONMap, result.metadata["tool_snapshot"])
-    assert event["status"] == "timed_out"
-    assert snapshot["status"] == "timed_out"
+    assert event["status"] == "timeout"
+    assert snapshot["status"] == "timeout"

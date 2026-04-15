@@ -4,11 +4,48 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-from typing import cast
+from enum import StrEnum
+from typing import ClassVar, cast, get_args
+
+from acp.schema import ToolCallStatus
 
 from nanobot.acp.contracts import JSONMap, JSONValue
 from nanobot.acp.state.models import ACPBucketType, ACPOutboundKind, FlushResult
 from nanobot.acp.state.pools.base import ACPPoolBase
+
+# 与 python-sdk 的 ToolCallStatus 保持同源字面值，再追加 runtime 专属 timeout。
+_SDK_TOOL_STATUSES: frozenset[str] = frozenset(cast(tuple[str, ...], get_args(ToolCallStatus)))
+
+
+class ToolRuntimeStatus(StrEnum):
+    """工具状态统一枚举：兼容 ACP 规范状态并扩展 runtime 的 timeout。"""
+
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    TIMEOUT = "timeout"
+
+    @classmethod
+    def from_raw(cls, value: str | None) -> ToolRuntimeStatus | None:
+        """把外部状态字符串归一化为枚举；兼容历史 `timed_out` 写法。"""
+
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            return None
+        if normalized == "timed_out":
+            normalized = cls.TIMEOUT.value
+        if normalized in _SDK_TOOL_STATUSES or normalized == cls.TIMEOUT.value:
+            return cls(normalized)
+        return None
+
+    @classmethod
+    def terminal_statuses(cls) -> frozenset[ToolRuntimeStatus]:
+        """统一终态集合，避免 handler/pool 各自维护字符串常量。"""
+
+        return frozenset((cls.COMPLETED, cls.FAILED, cls.TIMEOUT))
 
 
 @dataclass(slots=True)
@@ -19,12 +56,26 @@ class ToolPoolPayload:
     tool_call_id: str
     title: str | None = None
     kind: str | None = None
-    status: str | None = None
+    status: ToolRuntimeStatus | None = None
     content: list[JSONValue] | None = None
     locations: list[JSONValue] | None = None
     raw_input: JSONValue | None = None
     raw_output: JSONValue | None = None
     field_meta: JSONMap | None = None
+
+    # 统一维护 payload 字段到 ACP alias 的映射，避免手写逐 key 转换分散在逻辑里。
+    ALIAS_ATTR_MAP: ClassVar[tuple[tuple[str, str], ...]] = (
+        ("sessionUpdate", "session_update"),
+        ("toolCallId", "tool_call_id"),
+        ("title", "title"),
+        ("kind", "kind"),
+        ("status", "status"),
+        ("content", "content"),
+        ("locations", "locations"),
+        ("rawInput", "raw_input"),
+        ("rawOutput", "raw_output"),
+        ("_meta", "field_meta"),
+    )
 
 
 class ToolPool(ACPPoolBase):
@@ -40,7 +91,7 @@ class ToolPool(ACPPoolBase):
         self._messages: list[str] = []
         self._events: list[ToolPoolPayload] = []
         self._snapshot: ToolPoolPayload | None = None
-        self._status: str | None = None
+        self._status: ToolRuntimeStatus | None = None
         self._title: str | None = None
         self._tool_call_id: str = self._resolve_tool_call_id(bucket_key)
         self._dirty = False
@@ -71,7 +122,7 @@ class ToolPool(ACPPoolBase):
         if self._snapshot is not None:
             self._status = self._snapshot.status
             self._title = self._snapshot.title
-        if payload.status in {"completed", "failed", "timed_out"}:
+        if payload.status in ToolRuntimeStatus.terminal_statuses():
             self.mark_terminal()
         return consumed
 
@@ -83,7 +134,7 @@ class ToolPool(ACPPoolBase):
         self._dirty = False
         previous = list(self._messages[:-1])
         previous_values: list[JSONValue] = list(previous)
-        metadata: JSONMap = {"tool_hint": True, "_tool_hint": True}
+        metadata: JSONMap = {"_tool_hint": True}
         if previous_values:
             metadata["previous"] = previous_values
         if self._status:
@@ -111,7 +162,7 @@ class ToolPool(ACPPoolBase):
                 session_update="tool_call_update",
                 tool_call_id=self._tool_call_id,
                 title=self._title,
-                status="timed_out",
+                status=ToolRuntimeStatus.TIMEOUT,
             )
         )
 
@@ -137,28 +188,13 @@ class ToolPool(ACPPoolBase):
 
     @staticmethod
     def _build_event_map(payload: ToolPoolPayload) -> JSONMap:
-        """按 ACP alias 组织事件结构，便于下游无需再做字段名转换。"""
+        """通过类级 alias 映射统一转换，避免手写 key 漂移。"""
 
-        event: JSONMap = {
-            "sessionUpdate": payload.session_update,
-            "toolCallId": payload.tool_call_id,
-        }
-        if payload.title is not None:
-            event["title"] = payload.title
-        if payload.kind is not None:
-            event["kind"] = payload.kind
-        if payload.status is not None:
-            event["status"] = payload.status
-        if payload.content is not None:
-            event["content"] = payload.content
-        if payload.locations is not None:
-            event["locations"] = payload.locations
-        if payload.raw_input is not None:
-            event["rawInput"] = payload.raw_input
-        if payload.raw_output is not None:
-            event["rawOutput"] = payload.raw_output
-        if payload.field_meta is not None:
-            event["_meta"] = payload.field_meta
+        event: JSONMap = {}
+        for alias_key, attr_name in ToolPoolPayload.ALIAS_ATTR_MAP:
+            value = getattr(payload, attr_name)
+            if value is not None:
+                event[alias_key] = cast(JSONValue, value)
         return event
 
     @staticmethod

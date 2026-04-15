@@ -10,7 +10,7 @@ from nanobot.acp.contracts import JSONMap, JSONValue
 from nanobot.acp.state.handlers.base import HandlerConsumeResult, StateUpdateHandler
 from nanobot.acp.state.models import ACPBucketType, ACPUpdateType
 from nanobot.acp.state.pools import ToolPool
-from nanobot.acp.state.pools.tool import ToolPoolPayload
+from nanobot.acp.state.pools.tool import ToolPoolPayload, ToolRuntimeStatus
 
 
 class ToolUpdateHandler(StateUpdateHandler):
@@ -47,7 +47,7 @@ class ToolUpdateHandler(StateUpdateHandler):
         payload = self._build_pool_payload(typed_update)
         typed_pool.accept(payload)
 
-        if payload.status in {"completed", "failed","timeout"} :
+        if payload.status in ToolRuntimeStatus.terminal_statuses():
             return HandlerConsumeResult(immediate_finalize=True)
         else:
             return HandlerConsumeResult()
@@ -75,7 +75,7 @@ class ToolUpdateHandler(StateUpdateHandler):
             tool_call_id=tool_call_id,
             title=cls._read_string(normalized, "title"),
             kind=cls._read_string(normalized, "kind"),
-            status=cls._read_string(normalized, "status"),
+            status=ToolRuntimeStatus.from_raw(cls._read_string(normalized, "status")),
             content=cls._read_list(normalized, "content"),
             locations=cls._read_list(normalized, "locations"),
             raw_input=normalized.get("rawInput"),
