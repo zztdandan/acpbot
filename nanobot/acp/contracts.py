@@ -21,28 +21,28 @@ ACPResourceBlock: TypeAlias = Any
 
 
 class ACPChannelName(StrEnum):
-    """负责本对象定义的职责边界与生命周期。"""
+    """ACP 出站通道名枚举：约束 runtime 回发消息时可用的逻辑通道。"""
 
     CLI = "cli"
     SYSTEM = "system"
 
 
 class ACPDirectIdentity(StrEnum):
-    """负责本对象定义的职责边界与生命周期。"""
+    """direct 入口身份常量：统一 CLI 直连请求的 session/chat 标识。"""
 
     SESSION_KEY = "cli:direct"
     CHAT_ID = "direct"
 
 
 class ACPPermissionPolicyName(StrEnum):
-    """负责本对象定义的职责边界与生命周期。"""
+    """权限策略枚举：定义 ACP tool-call 自动决策使用的策略名。"""
 
     STRICT = "strict"
     TRUSTED = "trusted"
 
 
 class ACPPermissionKind(StrEnum):
-    """负责本对象定义的职责边界与生命周期。"""
+    """权限选项 kind 枚举：统一 allow always/once/cancelled 三种协议值。"""
 
     ALLOW_ALWAYS = "allow_always"
     ALLOW_ONCE = "allow_once"
@@ -50,14 +50,14 @@ class ACPPermissionKind(StrEnum):
 
 
 class ACPPermissionOutcome(StrEnum):
-    """负责本对象定义的职责边界与生命周期。"""
+    """权限结果枚举：约束 permission_reply 载荷里的 outcome 字段。"""
 
     CANCELLED = "cancelled"
     SELECTED = "selected"
 
 
 class ObservabilityScopeName(StrEnum):
-    """负责本对象定义的职责边界与生命周期。"""
+    """观测域枚举：标记事件由 process/runtime/state 哪个 owner 产生。"""
 
     PROCESS = "process"
     RUNTIME = "runtime"
@@ -65,7 +65,7 @@ class ObservabilityScopeName(StrEnum):
 
 
 class ObservabilityEventName(StrEnum):
-    """负责本对象定义的职责边界与生命周期。"""
+    """观测事件名枚举：统一结构化审计与工具日志的事件关键字。"""
 
     CONNECTION_READY = "connection_ready"
     CONNECTION_RESET = "connection_reset"
@@ -81,13 +81,13 @@ class ObservabilityEventName(StrEnum):
 
 
 def build_permission_cancelled_payload() -> JSONMap:
-    """执行该方法定义的处理流程并返回结果。"""
+    """构造取消权限回复载荷；用于 strict 策略或超时拒绝场景。"""
 
     return {"outcome": {"outcome": ACPPermissionOutcome.CANCELLED.value}}
 
 
 def build_permission_selected_payload(option_id: str) -> JSONMap:
-    """执行该方法定义的处理流程并返回结果。"""
+    """构造选中权限回复载荷；用于把用户选择回传给 ACP 协议层。"""
 
     return {
         "outcome": {

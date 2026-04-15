@@ -8,7 +8,7 @@ from nanobot.acp.observability.queue import ObservabilityEvent
 
 
 def write_audit_event(event: ObservabilityEvent) -> None:
-    """执行该方法定义的处理流程并返回结果。"""
+    """写入结构化审计日志；用于长期留痕与问题复盘。"""
 
     logger.debug(
         "ACP audit scope={} event={} request_key={} nanobot_side_session_key={} acp_side_session_id={} payload={}",

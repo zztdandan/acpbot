@@ -8,7 +8,7 @@ from nanobot.acp.observability.queue import ObservabilityEvent
 
 
 def emit_tooling_event(event: ObservabilityEvent) -> None:
-    """执行该方法定义的处理流程并返回结果。"""
+    """输出 tooling 侧观测日志；用于开发调试时快速查看事件关键信息。"""
 
     logger.info(
         "ACP event scope={} event={} request_key={} session={} acp_session={} payload_keys={}",

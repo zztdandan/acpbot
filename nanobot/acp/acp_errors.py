@@ -1,10 +1,10 @@
-"""该模块承接重构后的职责边界。"""
+"""ACP 错误判定工具：集中维护协议异常的兼容识别逻辑。"""
 
 from __future__ import annotations
 
 
 def _is_invalid_params_request_error(exc: Exception) -> bool:
-    """执行该方法定义的处理流程并返回结果。"""
+    """判断异常是否属于 invalid params；用于触发会话绑定失效回收。"""
 
     code = getattr(exc, "code", None)
     if code == -32602:
