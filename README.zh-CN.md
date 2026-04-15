@@ -42,60 +42,47 @@ OpenClaw 系服务很多都自研了底层 agent runtime。对于通用助手场
 
 项目品牌与运行时方向已转向 `acpbot`，但迁移路径保持渐进与务实。
 
-## 当前开发进展（2026-03）
+## v0.9.0 版本说明
 
-基于当前项目文档（`docs/design`、`docs/issue`、`docs/research`、`docs/superpowers`）综合状态，ACP 改造已完成核心链路可用，当前处于收口与韧性增强阶段。
+`v0.9.0` 是一次以 ACP 重构成果为核心的版本发布，而不再只是“内部实现调整”。
 
-### 已完成并验证
+### 本版重点
 
-- ACP runtime 基线与配置体系文档化并已落地。
-- 超大帧导致的会话中断与会话韧性问题已修复。
-- Telegram 出站进度/最终消息重复与批处理问题已修复。
-- inbound/outbound JSONL 运行日志已支持轮转与进程退出关闭。
-- ACP 可观测性加固已完成（inbound 去重、outbound JSON、gateway 启动分片日志）。
-- ACP session 持久化、heartbeat 广播、cron 会话模式改造已完成。
-- session 列表解析/对账与重启后激活链路已修复。
-- ACP 文件传输统一基线已完成（media <-> ACP blocks、WS blob/path 双模式、2MB 限制、100KB 回归通过）。
-- ACP E2E smoke `E2E-000~003` 已稳定通过。
-- WS blob E2E（`E2E-WS-001~003`）已通过。
+- 将 `nanobot/acp` 从早期的大型 mixin/dispatcher 拼装模式，重构为以显式 runtime owner 为中心的面向对象架构。
+- 明确划分 `runtime`、`inbound`、`sessionmap`、`state`、`observability` 等模块边界，让请求生命周期、会话真相、结构化进度、审计记录各归其位。
+- 将单次请求执行态独立为完整的 state 领域，拆出消息池、路由器、handler、权限协调器等子域，使 text、media、tool、thought、plan 等更新类型都能按职责扩展。
+- 将入站处理收口为固定多阶段 AOP 流水线，使 normalize、permission reply、命令路由、媒体预处理、请求构建形成稳定编排边界。
+- 将映射体系与监控体系独立为单独 owner，既提升当前的可调试性，也为后续协议扩展和功能增量预留空间。
 
-### 当前进行中
+### 这意味着什么
 
-- FT 真实链路落地（TDD）：入站 `resource_link` 收敛 + 出站 plugin 回路（`acp_send_file`）。
-- ACP E2E backlog 的 D/E/F 套件分阶段落地准备。
-- ACP 全离线双阶段容器部署子库持续推进中。
-
-### 仍待解决的缺口
-
-- ACP JSON-RPC 覆盖不完整（`fs/read_text_file`、`terminal/*` 等回调能力缺口）。
-- 权限流仍以静态策略（`strict` / `trusted` / `yolo`）为主，尚未形成渠道用户交互式授权。
-- 授权链路中的 `tool_call` 上下文尚未完整保留，影响“批准什么操作”的展示能力。
-- 多种 `session/update` 类型（如 `agent_thought_chunk`、`plan`、`usage_update`）尚未端到端覆盖。
+- ACP 后端不再依赖一个不断膨胀、跨模块互相调用的大型 helper/mixin 组合体，而是拥有稳定的对象模型与清晰生命周期。
+- 后续新增能力时，可以直接扩展所属领域模块，而不是继续回到中心化巨型 dispatcher 中打补丁。
+- 未来无论是测试补齐、问题定位，还是继续扩展协议覆盖面，都会建立在更窄、更稳定、更可维护的 owner 边界之上。
 
 ## Roadmap
 
-### 阶段 1：文件传输真实链路收口（当前）
+### 阶段 1：架构重组与真实链路收口（已完成）
 
-- 完成入站 media 规范化，统一为稳定的 `resource_link` 语义。
-- 完成基于 canonical plugin（`acp_send_file`）的真实出站文件回路。
-- 跑通并稳定 FT `E2E-FT-001~005`，以结构化审计事件作为关键验收依据。
+- 将 `nanobot/acp` 从早期大型 mixin 式拼装重构为显式 runtime owner 驱动的模块化架构。
+- 将 `runtime`、`inbound`、`sessionmap`、`state`、`observability` 拆分为稳定 owner，明确请求态与会话态边界。
+- 完成面向当前版本发布链路的 media 规范化、`resource_link` 与出站文件回路基线收口。
 
-### 阶段 2：权限与交互模型完善
+### 阶段 2：权限上下文与聊天式授权交互（已完成）
 
-- 在权限请求链路保留 `session_id` 与 `tool_call` 完整上下文。
-- 打通渠道侧“批准/拒绝”交互授权与超时兜底。
-- 让静态策略回归兜底能力，而非主交互路径。
+- 在权限链路中保留 `session_id` 与 `tool_call` 上下文，使授权决策能够绑定到正确的活跃请求。
+- 将文本式授权视为聊天工具的一等交互形态，以 `/permission <number>` 回复与超时兜底作为主交互，而不是预设按钮式 UI。
+- 让静态策略模式回归兜底能力，而不是主要交互入口。
 
-### 阶段 3：session/update 与 JSON-RPC 全量覆盖
+### 阶段 3：富更新类型、metadata 与 E2E 收口（`v0.9.0` 已完成）
 
-- 扩展 `session/update` 对 thought/plan/usage/config/info/commands 等更新类型的处理。
-- 增强“能力关闭场景下异常 RPC”韧性，避免会话崩溃。
-- 制定并冻结 ACP 出站 `metadata` 规范（字段契约、兼容等级、迁移路径）。
-- 按里程碑逐步让 dispatcher/runtime 输出结构化 `metadata`，并与 native 行为做一致性校验。
-- 按 `tests/acp_e2e` 逐项完成 D/E/F backlog 并收敛验收口径。
+- 将 thought、plan、usage、commands、config、session info 等更丰富的 `session/update` 家族收口到独立 state handler 与最终 metadata。
+- 完成当前运行时主链路所需的 ACP E2E 验证，包括文件传输与面向聊天工具的 progress/permission 流程。
 
-### 阶段 4：交付与运行保障
+### 阶段 4：交付加固与长尾兼容性
 
+- 继续细化按 tool kind 提供差异化渲染建议，让不同操作在聊天渠道中拥有更清晰的展示文案，而不改变核心授权模型。
+- 将意外 `fs/*`、`terminal/*` 回调的 JSON-RPC 长尾兼容与韧性加固归入交付阶段处理，而不再作为当前版本里程碑的阻塞项。
 - 完成离线部署产物与可复现运行手册。
 - 持续稳定审计与可观测输出，支撑排障与合规。
 - 持续保持对 AgentLoop 与 native/acp 双后端边界的兼容。
