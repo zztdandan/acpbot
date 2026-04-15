@@ -101,7 +101,9 @@ class ACPRuntime:
         # 调用方通过 await wait_entry.done_future 获取最终响应。
 
         # ===== 管理器组件（职责分离）=====
-        self.observability_manager = ObservabilityManager()
+        self.observability_manager = ObservabilityManager(
+            audit_base_dir=self.resolve_acp_workspace_path()
+        )
         # 可观测性：上报错误、状态变更、生命周期事件
         self._observability_start_lock = asyncio.Lock()
 

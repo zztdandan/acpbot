@@ -57,11 +57,12 @@ class ACPPermissionOutcome(StrEnum):
 
 
 class ObservabilityScopeName(StrEnum):
-    """观测域枚举：标记事件由 process/runtime/state 哪个 owner 产生。"""
+    """观测域枚举：标记事件由 process/runtime/state/inbound 哪个 owner 产生。"""
 
     PROCESS = "process"
     RUNTIME = "runtime"
     STATE = "state"
+    INBOUND = "inbound"
 
 
 class ObservabilityEventName(StrEnum):
