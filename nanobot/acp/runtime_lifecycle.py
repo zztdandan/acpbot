@@ -120,6 +120,8 @@ async def ensure_connection(runtime: ACPRuntime) -> None:
             runtime.session_runtime_manager.rebuild()
             runtime.sessionmap_binding_manager.mark_unbootstrapped()
             runtime.fail_all_wait_entries(RuntimeError("ACP connection bootstrap failed"))
+            await runtime.cancel_all_wait_entry_tasks()
+            runtime.clear_all_wait_entries()
             raise
 
 
@@ -140,7 +142,10 @@ async def reset_connection(runtime: ACPRuntime) -> None:
         await runtime.process_runtime_manager.rebuild(error=RuntimeError("ACP runtime rebuilt"))
         runtime.session_runtime_manager.rebuild()
         runtime.sessionmap_binding_manager.mark_unbootstrapped()
+        # 两段式收口 wait_entry：先 fail future，再 cancel task，最后清空索引。
         runtime.fail_all_wait_entries(RuntimeError("ACP runtime rebuilt"))
+        await runtime.cancel_all_wait_entry_tasks()
+        runtime.clear_all_wait_entries()
         await runtime.push_observability(
             runtime.new_observability_event(
                 scope=ObservabilityScopeName.RUNTIME,

@@ -28,6 +28,7 @@ from nanobot.acp.observability import ObservabilityEvent, ObservabilityManager
 from nanobot.acp.runtime_lifecycle import close_runtime, ensure_connection, reset_connection
 from nanobot.acp.runtime_models import (
     ProcessDirectInput,
+    RequestSource,
     RequestStatus,
     RuntimeWaitEntry,
     StopResult,
@@ -102,6 +103,7 @@ class ACPRuntime:
         # ===== 管理器组件（职责分离）=====
         self.observability_manager = ObservabilityManager()
         # 可观测性：上报错误、状态变更、生命周期事件
+        self._observability_start_lock = asyncio.Lock()
 
         self.sessionmap_binding_manager = SessionMapBindingManager(self)
         # 会话绑定：维护 nanobot_side_session_key <-> acp_side_session_id 映射
@@ -134,6 +136,12 @@ class ACPRuntime:
         """生成全局唯一请求键（格式 acp:{uuid4_hex}），用于等待链索引与可观测性追踪。"""
         return f"acp:{uuid4().hex}"
 
+    async def ensure_observability_started(self) -> None:
+        """幂等启动可观测消费循环，避免 run/process_direct 并发启动竞争。"""
+
+        async with self._observability_start_lock:
+            await self.observability_manager.start()
+
     async def await_acp_prompt(self, **kwargs: object) -> None:
         """ACP 连接健康检查：调用 prompt 并等待响应，用于 ensure_connection 探测 Agent 就绪。
 
@@ -147,7 +155,12 @@ class ACPRuntime:
         prompt_callable = cast(Callable[..., Awaitable[None]], self._acp_client_conn.prompt)
         await asyncio.wait_for(prompt_callable(**kwargs), timeout=timeout)
 
-    def register_wait_entry(self, request_key: str) -> RuntimeWaitEntry:
+    def register_wait_entry(
+        self,
+        request_key: str,
+        *,
+        source: RequestSource = "direct",
+    ) -> RuntimeWaitEntry:
         """为请求创建 Future 并注册到等待链，返回 wait_entry 供调用方 await。
 
         使用模式：
@@ -160,9 +173,18 @@ class ACPRuntime:
         wait_entry = RuntimeWaitEntry(
             request_key=request_key,
             done_future=asyncio.get_running_loop().create_future(),
+            source=source,
         )
         self._wait_by_request_key[request_key] = wait_entry
         return wait_entry
+
+    def attach_wait_entry_task(self, request_key: str, task: asyncio.Task[None]) -> None:
+        """将 bus dispatch task 绑定到 wait_entry，便于 close/reset 统一取消回收。"""
+
+        wait_entry = self._wait_by_request_key.get(request_key)
+        if wait_entry is None:
+            return
+        wait_entry.dispatch_task = task
 
     def remove_wait_entry(self, request_key: str) -> None:
         """将请求从等待链移除（pop 含 Key 不存在时的静默处理），通常在 finally 中调用。"""
@@ -178,6 +200,24 @@ class ACPRuntime:
         for wait_entry in self._wait_by_request_key.values():
             if not wait_entry.done_future.done():
                 wait_entry.done_future.set_exception(error)
+
+    async def cancel_all_wait_entry_tasks(self) -> None:
+        """取消并等待所有挂在 wait_entry 上的 dispatch task 收敛。"""
+
+        tasks: list[asyncio.Task[None]] = []
+        for wait_entry in self._wait_by_request_key.values():
+            task = wait_entry.dispatch_task
+            if task is None or task.done():
+                continue
+            task.cancel()
+            tasks.append(task)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    def clear_all_wait_entries(self) -> None:
+        """清空 wait_entry 索引；用于 close/reset 的最终收口。"""
+
+        self._wait_by_request_key.clear()
 
     async def complete_process_request(
         self,
@@ -214,11 +254,20 @@ class ACPRuntime:
         """启动运行时主循环：ensure_connection → observability.start → 持续消费总线并 create_task 分发。"""
         self._running = True
         await self.ensure_connection()
-        await self.observability_manager.start()
+        await self.ensure_observability_started()
         while self._running:
             message = await self.bus.consume_inbound()
-            # 并发处理：不阻塞主循环，每个消息独立处理
-            asyncio.create_task(self.dispatch_inbound(message))
+            # 先注册 wait_entry，再创建 dispatch task，避免 task 抢跑导致的注册竞态。
+            request_key = self.new_request_key()
+            wait_entry = self.register_wait_entry(request_key, source="bus")
+            task = asyncio.create_task(
+                self.dispatch_inbound(
+                    message,
+                    request_key=request_key,
+                    wait_entry=wait_entry,
+                )
+            )
+            self.attach_wait_entry_task(request_key, task)
 
     async def stop(self) -> None:
         """置 _running=False 请求主循环退出（异步，不等待完成）。"""
@@ -247,9 +296,9 @@ class ACPRuntime:
             - 委托 inbound_manager.handle_process_direct 发至 ACP；
             - await wait_entry.done_future 获取最终 OutboundMessage；
             - finally 中 remove_wait_entry。"""
-        await self.observability_manager.start()
+        await self.ensure_observability_started()
         request_key = self.new_request_key()
-        wait_entry = self.register_wait_entry(request_key)
+        wait_entry = self.register_wait_entry(request_key, source="direct")
         try:
             # 构造 ProcessDirectInput 对象（封装所有请求参数）
             input = ProcessDirectInput(
@@ -272,7 +321,13 @@ class ACPRuntime:
             # 清理等待条目（无论成功或失败都执行）
             self.remove_wait_entry(request_key)
 
-    async def dispatch_inbound(self, message: InboundMessage) -> None:
+    async def dispatch_inbound(
+        self,
+        message: InboundMessage,
+        *,
+        request_key: str,
+        wait_entry: RuntimeWaitEntry,
+    ) -> None:
         """总线入站消息处理器（run 主循环调用）：等待链 + inbound_manager + publish_final_outbound。
 
         处理流程：
@@ -280,9 +335,6 @@ class ACPRuntime:
             - await done_future 后 publish_final_outbound 路由回原始频道；
             - 异常全捕获 + logger.exception + 上报 DISPATCH_INBOUND_ERROR（不中断主循环）。
         """
-        await self.observability_manager.start()
-        request_key = self.new_request_key()
-        wait_entry = self.register_wait_entry(request_key)
         try:
             # 委托给 inbound_manager 处理（实际发送到 ACP）
             await self.inbound_manager.handle_inbound(message, request_key=request_key)
@@ -290,6 +342,9 @@ class ACPRuntime:
             outbound = await wait_entry.done_future
             # 发布最终结果到总线（路由回原始频道）
             await self.publish_final_outbound(message=message, outbound=outbound)
+        except asyncio.CancelledError:
+            # close/reset 主动取消时不视为业务错误，直接退出。
+            return
         except Exception as exc:
             # 记录异常堆栈（便于调试）
             logger.exception("ACP dispatch_inbound failed")

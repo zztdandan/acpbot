@@ -16,7 +16,7 @@ import asyncio
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Awaitable, Callable
+from typing import TYPE_CHECKING, Awaitable, Callable, Literal
 
 from nanobot.acp.contracts import ACPArtifactMap, ACPChannelName, ACPDirectIdentity, JSONMap
 from nanobot.bus.events import InboundMessage, OutboundMessage
@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
 
 ProgressCallback = Callable[..., Awaitable[None]]
+RequestSource = Literal["direct", "bus"]
 
 
 class RequestStatus(str, Enum):
@@ -49,6 +50,10 @@ class RuntimeWaitEntry:
     # 请求唯一键，用于匹配完成通知。
     done_future: asyncio.Future[OutboundMessage]
     # 最终结果等待对象，由运行时统一写入。
+    source: RequestSource = "direct"
+    # 请求入口来源（direct 或 bus），用于观测与回收策略。
+    dispatch_task: asyncio.Task[None] | None = None
+    # bus dispatch 任务句柄；direct 请求保持 None。
 
 
 @dataclass(slots=True)
