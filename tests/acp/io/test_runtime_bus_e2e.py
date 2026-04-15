@@ -18,7 +18,9 @@ from tests.acp.sessionmap.helpers import (
     write_runtime_config,
 )
 
-FINAL_TIMEOUT_SECONDS = 180.0
+# 真实后端偶发排队抖动（尤其 CI 并发时）会让 final 晚于 180s，
+# 这里给到更保守窗口，优先消除 e2e 偶发超时噪音。
+FINAL_TIMEOUT_SECONDS = 300.0
 POLL_TIMEOUT_SECONDS = 2.0
 
 
@@ -128,7 +130,9 @@ async def test_runtime_bus_inbound_research_workspace_and_report_snapshot(tmp_pa
 
     # 明确要求模型用工具扫描当前 workspace，并按 JSON 回答，方便测试稳定断言。
     research_prompt = (
-        "Use tools to inspect the current workspace. "
+        "Inspect only the current workspace root. "
+        "Do not recurse into subdirectories. "
+        "Use at most one listing tool call and finish immediately. "
         "Return ONLY a JSON object with keys: "
         "model_id (string), workspace_path (string), top_level_entries (array of names). "
         "top_level_entries must contain only first-level names directly under workspace_path. "

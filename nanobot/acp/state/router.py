@@ -116,6 +116,7 @@ class ProgressRouter:
         handler = self._handler_registry.resolve(update)
         pool_key = handler.build_pool_key(update)
         lock = self._state_manager.get_pool_lock(pool_key)
+        # 这里用数组是“统一批处理写法 + 可扩展性”，不是因为当前逻辑一定会有多条，与close保持一致
         flushed: list[tuple[StateUpdateHandler, FlushResult]] = []
         async with lock:
             entry = self._state_manager.get_pool_entry(pool_key)
