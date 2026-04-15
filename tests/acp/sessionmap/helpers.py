@@ -122,6 +122,13 @@ def extract_json_object(text: str) -> dict[str, Any]:
             if stripped.startswith("json"):
                 stripped = stripped[4:].strip()
 
+    # 兼容部分后端返回的标记包裹：
+    # <final>
+    # {...json...}
+    # </final>
+    if stripped.startswith("<final>") and stripped.endswith("</final>"):
+        stripped = stripped[len("<final>") : -len("</final>")].strip()
+
     payload = json.loads(stripped)
     if not isinstance(payload, dict):
         raise ValueError("ACP response JSON must be an object")
@@ -151,17 +158,19 @@ async def discover_real_session_seed() -> RealSessionSeed:
         pytest.skip("Checked-in sessionmap fixture does not contain the configured target session")
 
     async with open_real_backend_connection() as conn:
-        listed = await conn.list_sessions(cwd=str(HARNESS_ROOT))
-        sessions = getattr(listed, "sessions", None) or []
-        listed_session_ids = [
-            session_id for item in sessions if (session_id := extract_session_id(item))
-        ]
-        missing_fixture_sessions = [
-            session_id for session_id in fixture_session_ids if session_id not in listed_session_ids
-        ]
+        # 说明：真实后端 list_sessions 在部分环境下只返回窗口化结果，
+        # 仅凭列表缺失会把“可 restore 的老会话”误判为 stale。
+        # 这里改为逐个探测 fixture session 是否可 restore，作为存在性真值来源。
+        missing_fixture_sessions: list[str] = []
+        for session_id in fixture_session_ids:
+            try:
+                await resume_existing_session(conn, session_id=session_id)
+            except Exception:
+                missing_fixture_sessions.append(session_id)
+
         if missing_fixture_sessions:
             pytest.skip(
-                "Checked-in sessionmap fixture is stale; missing real ACP sessions: "
+                "Checked-in sessionmap fixture is stale; restore failed for real ACP sessions: "
                 + ", ".join(missing_fixture_sessions)
             )
 

@@ -46,7 +46,11 @@ class ToolUpdateHandler(StateUpdateHandler):
         typed_pool = cast(ToolPool, pool)
         payload = self._build_pool_payload(typed_update)
         typed_pool.accept(payload)
-        return HandlerConsumeResult(immediate_finalize=payload.status in {"completed", "failed"})
+
+        if payload.status in {"completed", "failed","timeout"} :
+            return HandlerConsumeResult(immediate_finalize=True)
+        else:
+            return HandlerConsumeResult()
 
     def on_deadhand(self, *, state_manager, pool) -> None:
         """工具池 300 秒死手到点后补写一条超时消息，并将该池转入终态。"""
