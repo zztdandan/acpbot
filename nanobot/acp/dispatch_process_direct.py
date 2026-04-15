@@ -70,7 +70,9 @@ async def execute_process_request(
             session_id=active_entry.acp_side_session_id,
             **prompt_meta,
         )
-        return active_entry.state_manager.materialize_final_outbound(partial=False)
+        # 中文注释：执行成功后先等待 state 收尾（flush + permission waiter 终结），
+        # 再物化 final outbound，避免 final_text 仍停留在空快照。
+        return await active_entry.state_manager.finalize_and_materialize_final_outbound()
     except Exception as exc:
         if _is_invalid_params_request_error(exc):
             runtime.drop_session_binding_and_runtime_entry(

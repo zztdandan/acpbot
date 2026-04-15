@@ -237,6 +237,10 @@ class SessionStateManager:
         """消费一条 ACP session update；适用于 runtime 回调进入状态域主链的场景。"""
 
         if self._closed:
+            # 如果state关闭后还有消费传入，那么只能打日志，无法正常处理了
+            session_update_name = getattr(update, "session_update", None) or getattr(
+                update, "sessionUpdate", None
+            )
             await self._runtime.push_observability(
                 ObservabilityEvent(
                     scope=ObservabilityScopeName.STATE,
@@ -244,10 +248,26 @@ class SessionStateManager:
                     request_key=self.request_key,
                     nanobot_side_session_key=self.nanobot_side_session_key,
                     acp_side_session_id=self.acp_side_session_id,
+                    payload={
+                        "reason": "state_closed",
+                        "update_type": type(update).__name__,
+                        "session_update": str(session_update_name or ""),
+                    },
                 )
             )
             return
         await self._progress_router.handle_update(update)
+
+    async def finalize_and_materialize_final_outbound(self) -> OutboundMessage:
+        """等待 state 完整收尾后再物化 final outbound；用于 runtime 执行完成时的统一出口。
+
+        处理流程：
+            - 先执行 `close()`，强制触发 router 尾刷并终止 permission waiter
+            - 再基于 request-scope 聚合事实物化最终结果
+        """
+
+        await self.close()
+        return self.materialize_final_outbound(partial=False)
 
     def materialize_final_outbound(self, *, partial: bool = False) -> OutboundMessage:
         """按 request-scope 聚合事实物化最终 outbound；适用于 request 完成或异常回退场景。"""
