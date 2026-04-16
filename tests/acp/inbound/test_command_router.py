@@ -253,6 +253,55 @@ async def test_set_model_command_returns_direct_response(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+async def test_set_model_command_rejects_invalid_model_id(tmp_path: Path) -> None:
+    """验证 /set_model 对无效 model_id 返回失败且不污染当前选择。"""
+
+    config_path = write_runtime_config(tmp_path)
+    previous_config_path = get_config_path()
+    runtime = build_runtime(config_path)
+    session_key = _build_session_key("set-model-invalid")
+    chat_id = session_key.split(":", maxsplit=1)[1]
+    try:
+        models_content, _, _ = await _run_direct_command(
+            runtime=runtime,
+            command="/models",
+            session_key=session_key,
+            chat_id=chat_id,
+        )
+        available_models = _parse_catalog_ids(models_content)
+        if not available_models:
+            pytest.skip("ACP backend returned no available models for invalid /set_model test")
+
+        before_current = _parse_current_value(models_content, "Current model")
+        invalid_model = "__invalid_model_for_test__"
+        assert invalid_model not in available_models
+
+        content, progress_events, outbound_bus_size = await _run_direct_command(
+            runtime=runtime,
+            command=f"/set_model {invalid_model}",
+            session_key=session_key,
+            chat_id=chat_id,
+        )
+        assert content.startswith(f"Model switch failed: {invalid_model}.")
+        assert "invalid model id" in content
+        _assert_direct_command_observability(
+            progress_events=progress_events,
+            outbound_bus_size=outbound_bus_size,
+        )
+
+        verify_models_content, _, _ = await _run_direct_command(
+            runtime=runtime,
+            command="/models",
+            session_key=session_key,
+            chat_id=chat_id,
+        )
+        assert _parse_current_value(verify_models_content, "Current model") == before_current
+    finally:
+        await close_runtime_quietly(runtime)
+        set_config_path(previous_config_path)
+
+
+@pytest.mark.asyncio
 async def test_set_agent_command_returns_direct_response(tmp_path: Path) -> None:
     """验证 /set_agent 会真实调用 ACP 接口并更新当前代理。"""
 

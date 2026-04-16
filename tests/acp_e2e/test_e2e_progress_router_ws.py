@@ -181,6 +181,51 @@ def _metadata_session_ids(frames: list[dict[str, Any]]) -> set[str]:
     return session_ids
 
 
+async def _send_and_expect_command_final(
+    ws: websockets.ClientConnection,
+    *,
+    chat_id: str,
+    session_key: str | None,
+    command_text: str,
+    timeout: float = 45.0,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Send one slash command and wait for ack + final frames.
+
+    中文注释：WS 命令流至少应有 ack（传输层）和 final（业务层直返）；
+    若顺序抖动，循环读取直到两者都出现，避免对帧先后做脆弱假设。
+    """
+
+    payload = {
+        "type": "send",
+        "chatId": chat_id,
+        "content": command_text,
+    }
+    if session_key:
+        payload["sessionKey"] = session_key
+    await ws.send(json.dumps(payload))
+
+    ack_frame: dict[str, Any] | None = None
+    final_frame: dict[str, Any] | None = None
+    end_at = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < end_at:
+        remaining = end_at - asyncio.get_running_loop().time()
+        payload = json.loads(await asyncio.wait_for(ws.recv(), timeout=min(8.0, remaining)))
+        assert isinstance(payload, dict)
+
+        frame_type = str(payload.get("type") or "")
+        if frame_type == "ack" and ack_frame is None:
+            ack_frame = payload
+            continue
+        if frame_type == "final":
+            final_frame = payload
+            # 命令是直返消息，看到 final 后即可结束本轮。
+            break
+
+    assert ack_frame is not None, f"Did not receive ack for command: {command_text}"
+    assert final_frame is not None, f"Did not receive final for command: {command_text}"
+    return ack_frame, final_frame
+
+
 @pytest.mark.asyncio
 async def test_e2e_progress_router_ws_scenario_a_outbound_schema_and_logs() -> None:
     """Scenario A: pure WS handshake + single turn message flow contract."""
@@ -288,5 +333,83 @@ async def test_e2e_progress_router_ws_scenario_b_permission_reply_and_timeout() 
             session_ids = _metadata_session_ids(all_frames)
             if session_ids:
                 assert len(session_ids) == 1
+    finally:
+        _stdout, _stderr = await _stop_gateway_if_needed(proc)
+
+
+@pytest.mark.asyncio
+async def test_e2e_progress_router_ws_scenario_c_models_and_agents_commands() -> None:
+    """Scenario C: verify WS `/models` and `/agents` return direct final responses."""
+
+    require_e2e_enabled()
+    ws_uri, ws_token = _ws_endpoint()
+    proc = await _start_gateway_if_needed()
+    try:
+        async with websockets.connect(ws_uri, open_timeout=5.0, close_timeout=2.0) as ws:
+            chat_id = "progress-router-c"
+            session_key = f"websocket:{chat_id}"
+            await _auth_and_bind(
+                ws,
+                chat_id=chat_id,
+                principal_id="progress-router-c-user",
+                ws_token=ws_token,
+            )
+
+            _, models_final = await _send_and_expect_command_final(
+                ws,
+                chat_id=chat_id,
+                session_key=session_key,
+                command_text="/models",
+            )
+            models_content = str(models_final.get("content") or "").strip()
+            assert models_content, "Expected non-empty /models response content"
+            assert "Unknown ACP slash command" not in models_content
+            models_meta = models_final.get("metadata")
+            assert isinstance(models_meta, dict)
+            assert models_meta.get("kind") == "command"
+            assert models_meta.get("_progress") is False
+
+            _, agents_final = await _send_and_expect_command_final(
+                ws,
+                chat_id=chat_id,
+                session_key=session_key,
+                command_text="/agents",
+            )
+            agents_content = str(agents_final.get("content") or "").strip()
+            assert agents_content, "Expected non-empty /agents response content"
+            assert "Unknown ACP slash command" not in agents_content
+            agents_meta = agents_final.get("metadata")
+            assert isinstance(agents_meta, dict)
+            assert agents_meta.get("kind") == "command"
+            assert agents_meta.get("_progress") is False
+    finally:
+        _stdout, _stderr = await _stop_gateway_if_needed(proc)
+
+
+@pytest.mark.asyncio
+async def test_e2e_progress_router_ws_scenario_d_models_without_session_key() -> None:
+    """Scenario D: verify `/models` still returns final when WS omits sessionKey."""
+
+    require_e2e_enabled()
+    ws_uri, ws_token = _ws_endpoint()
+    proc = await _start_gateway_if_needed()
+    try:
+        async with websockets.connect(ws_uri, open_timeout=5.0, close_timeout=2.0) as ws:
+            chat_id = "progress-router-d"
+            await _auth_and_bind(
+                ws,
+                chat_id=chat_id,
+                principal_id="progress-router-d-user",
+                ws_token=ws_token,
+            )
+            _, final_frame = await _send_and_expect_command_final(
+                ws,
+                chat_id=chat_id,
+                session_key=None,
+                command_text="/models",
+            )
+            content = str(final_frame.get("content") or "").strip()
+            assert content, "Expected non-empty /models response without sessionKey"
+            assert "Current model:" in content
     finally:
         _stdout, _stderr = await _stop_gateway_if_needed(proc)

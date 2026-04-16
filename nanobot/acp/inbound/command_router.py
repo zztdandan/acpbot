@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from nanobot.acp.contracts import ACP_META_KIND, ACP_META_PROGRESS, ACP_META_RENDER_AS, ACP_META_RENDER_AS_COMMAND, ACP_META_RENDER_AS_LIST, ACP_META_RENDER_AS_NORENDER, ACP_META_RENDER_AS_TEXT
+from nanobot.acp.contracts import (
+    ACP_META_KIND,
+    ACP_META_PROGRESS,
+    ACP_META_RENDER_AS,
+    ACP_META_RENDER_AS_LIST,
+    ACP_META_RENDER_AS_NORENDER,
+    ACP_META_RENDER_AS_TEXT,
+)
 from nanobot.acp.runtime_models import InboundContext
 from nanobot.bus.events import OutboundMessage
 
@@ -57,7 +64,7 @@ class CommandRouter:
             return None
 
         if command == "/help":
-            return self._reply(ctx, self.HELP_TEXT,ACP_META_RENDER_AS_TEXT)
+            return self._reply(ctx, self.HELP_TEXT, ACP_META_RENDER_AS_TEXT)
         if command == "/new":
             await self._runtime.ensure_sessionmap_truth_loaded()
             await self._runtime.stop_session(nanobot_side_session_key=ctx.nanobot_side_session_key)
@@ -68,62 +75,50 @@ class CommandRouter:
                 self._runtime.session_runtime_manager.drop_session_capabilities(
                     acp_side_session_id=old_acp_side_session_id
                 )
-            return self._reply(ctx, "New session started.",ACP_META_RENDER_AS_TEXT)
+            return self._reply(ctx, "New session started.", ACP_META_RENDER_AS_TEXT)
         if command == "/models":
             acp_side_session_id = await self._runtime.session_runtime_manager.ensure_ready_session(
                 nanobot_side_session_key=ctx.nanobot_side_session_key,
             )
             content = await self._runtime.list_models_command(acp_side_session_id)
-            return self._reply(ctx, content,ACP_META_RENDER_AS_LIST)
+            return self._reply(ctx, content, ACP_META_RENDER_AS_LIST)
         if command == "/agents":
             acp_side_session_id = await self._runtime.session_runtime_manager.ensure_ready_session(
                 nanobot_side_session_key=ctx.nanobot_side_session_key,
             )
             content = await self._runtime.list_agents_command(acp_side_session_id)
-            return self._reply(ctx, content,ACP_META_RENDER_AS_LIST)
+            return self._reply(ctx, content, ACP_META_RENDER_AS_LIST)
         if command == "/set_model":
             if not arg:
-                return self._reply(ctx, "invalid input, Usage: /set_model <model_id>",ACP_META_RENDER_AS_TEXT)
-            await self._runtime.ensure_connection()
-            acp_side_session_id = await self._runtime.session_runtime_manager.ensure_ready_session(
+                return self._reply(
+                    ctx, "invalid input, Usage: /set_model <model_id>", ACP_META_RENDER_AS_TEXT
+                )
+            result = await self._runtime.set_model_safe(
                 nanobot_side_session_key=ctx.nanobot_side_session_key,
-            )
-            if self._runtime._acp_client_conn is None:
-                raise RuntimeError("ACP connection is not available")
-            await self._runtime._acp_client_conn.set_session_model(
                 model_id=arg,
-                session_id=acp_side_session_id,
             )
-            caps = self._runtime.session_runtime_manager.get_session_capabilities(
-                acp_side_session_id
-            )
-            if caps is not None:
-                caps.remember_current_model(arg)
-            self._runtime.sessionmap_binding_manager.update_bound_model(
-                ctx.nanobot_side_session_key, arg
-            )
+            if not result.success:
+                return self._reply(
+                    ctx,
+                    f"Model switch failed: {arg}. reason={result.reason}. Session selection reset and session resumed.",
+                    ACP_META_RENDER_AS_TEXT,
+                )
             return self._reply(ctx, f"Model switched to: {arg}")
         if command == "/set_agent":
             if not arg:
-                return self._reply(ctx, "invalid input, Usage:  /set_agent <agent_id>",ACP_META_RENDER_AS_TEXT)
-            await self._runtime.ensure_connection()
-            acp_side_session_id = await self._runtime.session_runtime_manager.ensure_ready_session(
+                return self._reply(
+                    ctx, "invalid input, Usage:  /set_agent <agent_id>", ACP_META_RENDER_AS_TEXT
+                )
+            result = await self._runtime.set_agent_safe(
                 nanobot_side_session_key=ctx.nanobot_side_session_key,
+                agent_id=arg,
             )
-            if self._runtime._acp_client_conn is None:
-                raise RuntimeError("ACP connection is not available")
-            await self._runtime._acp_client_conn.set_session_mode(
-                mode_id=arg,
-                session_id=acp_side_session_id,
-            )
-            caps = self._runtime.session_runtime_manager.get_session_capabilities(
-                acp_side_session_id
-            )
-            if caps is not None:
-                caps.remember_current_agent(arg)
-            self._runtime.sessionmap_binding_manager.update_bound_agent(
-                ctx.nanobot_side_session_key, arg
-            )
+            if not result.success:
+                return self._reply(
+                    ctx,
+                    f"Agent switch failed: {arg}. reason={result.reason}. Session selection reset and session resumed.",
+                    ACP_META_RENDER_AS_TEXT,
+                )
             return self._reply(ctx, f"Agent switched to: {arg}")
         if command == "/stop":
             result = await self._runtime.stop_session(
@@ -132,27 +127,30 @@ class CommandRouter:
             if result.had_anything_to_stop:
                 return self._reply(
                     ctx,
-                    f"Stop requested. active_cancel_requested={result.active_cancel_requested} dropped_queued={result.dropped_queued_count}",ACP_META_RENDER_AS_TEXT
+                    f"Stop requested. active_cancel_requested={result.active_cancel_requested} dropped_queued={result.dropped_queued_count}",
+                    ACP_META_RENDER_AS_TEXT,
                 )
-            return self._reply(ctx, "Nothing active or queued for this session.",ACP_META_RENDER_AS_TEXT)
+            return self._reply(
+                ctx, "Nothing active or queued for this session.", ACP_META_RENDER_AS_TEXT
+            )
 
-        return self._reply(ctx, f"Unknown ACP slash command: {command}",ACP_META_RENDER_AS_TEXT)
+        return self._reply(ctx, f"Unknown ACP slash command: {command}", ACP_META_RENDER_AS_TEXT)
 
     @staticmethod
-    def _reply(ctx: InboundContext, content: str,render_as=None) -> OutboundMessage:
+    def _reply(ctx: InboundContext, content: str, render_as=None) -> OutboundMessage:
         """构造命令直返消息；统一复用当前上下文的 channel 与 chat_id。"""
-        command_reply_outbound=OutboundMessage(
+        command_reply_outbound = OutboundMessage(
             channel=ctx.channel,
             chat_id=ctx.chat_id,
             content=content,
         )
-        command_reply_outbound.metadata={
-            ACP_META_KIND:"command",
-            ACP_META_RENDER_AS:"command",
-            ACP_META_PROGRESS:False
+        command_reply_outbound.metadata = {
+            ACP_META_KIND: "command",
+            ACP_META_RENDER_AS: "command",
+            ACP_META_PROGRESS: False,
         }
         if render_as is None:
             #  不指定渲染者的话默认建议不渲染这个回调
-             command_reply_outbound.metadata[ACP_META_RENDER_AS]=ACP_META_RENDER_AS_NORENDER
+            command_reply_outbound.metadata[ACP_META_RENDER_AS] = ACP_META_RENDER_AS_NORENDER
 
         return command_reply_outbound

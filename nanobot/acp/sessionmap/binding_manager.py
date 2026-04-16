@@ -212,6 +212,24 @@ class SessionMapBindingManager:
         entry.updated_at = _now_iso_with_tz()
         self.persist()
 
+    def clear_bound_selection(self, nanobot_side_session_key: str) -> None:
+        """清空 bound_model/bound_agent，确保不会把失效选择继续持久化。
+
+        行为约束：
+            - 仅在条目存在且至少一个字段非空时才 revision+1 并落盘
+            - 两个字段都已为空时幂等返回，避免无意义写盘
+        """
+        entry = self._entries.get(nanobot_side_session_key)
+        if entry is None:
+            return
+        if entry.bound_model is None and entry.bound_agent is None:
+            return
+        entry.bound_model = None
+        entry.bound_agent = None
+        entry.revision += 1
+        entry.updated_at = _now_iso_with_tz()
+        self.persist()
+
     async def load_persistent_truth(self) -> None:
         """加载持久化绑定并执行启动对账。
 

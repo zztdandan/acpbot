@@ -194,3 +194,19 @@ class StopResult:
     def had_anything_to_stop(self) -> bool:
         """判断停止动作是否命中活跃或排队请求（active_cancel_requested or dropped_queued_count > 0）。"""
         return self.active_cancel_requested or self.dropped_queued_count > 0
+
+
+@dataclass(slots=True)
+class SessionSelectionResult:
+    """会话 model/agent 切换结果。
+
+    约定：
+        - success=True 表示 set 操作已生效并同步到本地能力缓存与持久化绑定
+        - success=False 表示 set 失败；调用方应参考 reason 向上游回包
+    """
+
+    success: bool
+    target: Literal["model", "agent"]
+    value: str
+    reason: str
+    acp_side_session_id: str | None = None
