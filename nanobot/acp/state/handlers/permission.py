@@ -10,6 +10,7 @@ from nanobot.acp.contracts import (
     ACP_META_PERMISSION_REQUEST_ID,
     ACP_META_PROGRESS,
     ACP_META_RENDER_AS,
+    ACP_META_RENDER_AS_NORENDER,
     ACP_META_RENDER_AS_PERMISSION_REPLY,
     ACP_META_RENDER_AS_PERMISSION_REQUEST,
     JSONMap,
@@ -96,7 +97,7 @@ class PermissionHandler(StateUpdateHandler):
                         ACP_META_KIND: ACP_META_KIND_PERMISSION,
                         ACP_META_PROGRESS: True,
                         ACP_META_PERMISSION_REQUEST_ID: request_id,
-                        ACP_META_RENDER_AS: ACP_META_RENDER_AS_PERMISSION_REPLY,
+                        ACP_META_RENDER_AS: ACP_META_RENDER_AS_NORENDER, # 不渲染这次回调，因为这个信息是解析结果
                     },
                 )
             )

@@ -26,11 +26,16 @@ ACP_META_PROGRESS = "_progress"
 ACP_META_PERMISSION_REQUEST_ID = "permission_request_id"
 
 # ACP metadata value conventions for permission/final rendering.
+# 几个固定渲染者
 ACP_META_KIND_PERMISSION = "permission"
 ACP_META_KIND_FINAL = "final"
 ACP_META_RENDER_AS_PERMISSION_REQUEST = "permission_request"
 ACP_META_RENDER_AS_PERMISSION_REPLY = "permission_reply"
 ACP_META_RENDER_AS_FINAL = "final"
+ACP_META_RENDER_AS_NORENDER="norender"
+ACP_META_RENDER_AS_COMMAND="command"
+ACP_META_RENDER_AS_TEXT="text"
+ACP_META_RENDER_AS_LIST="list"
 
 
 class ACPChannelName(StrEnum):
