@@ -379,6 +379,14 @@ def _pick(obj: ACPSessionPayload, *names: str) -> ACPSessionPayload:
         - 不做类型转换（如 str -> int），调用方需要自行处理
     """
 
+    # 先处理 dict：ACP payload 在不同链路下可能就是纯 JSON 字典。
+    if isinstance(obj, dict):
+        for name in names:
+            if name in obj:
+                return obj[name]
+        return None
+
+    # 再处理对象属性：兼容 Pydantic 模型或 SDK 自定义对象。
     for name in names:
         if hasattr(obj, name):
             return getattr(obj, name)

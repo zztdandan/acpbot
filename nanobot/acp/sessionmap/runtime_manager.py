@@ -220,26 +220,41 @@ class SessionRuntimeManager:
         if conn is None:
             return
 
+        caps = self.get_session_capabilities(acp_side_session_id)
+
         if model_id and hasattr(conn, "set_session_model"):
-            try:
-                await conn.set_session_model(model_id=model_id, session_id=acp_side_session_id)
-            except Exception as exc:
-                # 中文注释：任何 set 失败都按统一恢复策略执行：清空持久化选择并 resume。
-                await self._recover_after_set_failure_locked(
-                    nanobot_side_session_key=nanobot_side_session_key,
-                    acp_side_session_id=acp_side_session_id,
-                    failed_kind="model",
-                    failed_value=model_id,
-                    error=exc,
+            if caps is not None and caps.available_models and model_id not in caps.available_models:
+                logger.warning(
+                    "Skip ACP set_session_model because model is not in current catalog acp_side_session_id={} model_id={}",
+                    acp_side_session_id,
+                    model_id,
                 )
-                return
             else:
-                caps = self.get_session_capabilities(acp_side_session_id)
-                if caps is not None:
-                    caps.remember_current_model(model_id)
-                self._binding_manager.update_bound_model(nanobot_side_session_key, model_id)
+                try:
+                    await conn.set_session_model(model_id=model_id, session_id=acp_side_session_id)
+                except Exception as exc:
+                    # 中文注释：任何 set 失败都按统一恢复策略执行：清空持久化选择并 resume。
+                    await self._recover_after_set_failure_locked(
+                        nanobot_side_session_key=nanobot_side_session_key,
+                        acp_side_session_id=acp_side_session_id,
+                        failed_kind="model",
+                        failed_value=model_id,
+                        error=exc,
+                    )
+                    return
+                else:
+                    if caps is not None:
+                        caps.remember_current_model(model_id)
+                    self._binding_manager.update_bound_model(nanobot_side_session_key, model_id)
 
         if agent_id and hasattr(conn, "set_session_mode"):
+            if caps is not None and caps.available_agents and agent_id not in caps.available_agents:
+                logger.warning(
+                    "Skip ACP set_session_mode because agent is not in current catalog acp_side_session_id={} agent_id={}",
+                    acp_side_session_id,
+                    agent_id,
+                )
+                return
             try:
                 await conn.set_session_mode(mode_id=agent_id, session_id=acp_side_session_id)
             except Exception as exc:
@@ -252,10 +267,45 @@ class SessionRuntimeManager:
                 )
                 return
             else:
-                caps = self.get_session_capabilities(acp_side_session_id)
                 if caps is not None:
                     caps.remember_current_agent(agent_id)
                 self._binding_manager.update_bound_agent(nanobot_side_session_key, agent_id)
+
+    async def set_model_safe(
+        self,
+        *,
+        nanobot_side_session_key: str,
+        model_id: str,
+    ) -> SessionSelectionResult:
+        """安全设置会话模型：统一封装会话就绪、SDK 调用与失败恢复。"""
+
+        await self._runtime.ensure_connection()
+        acp_side_session_id = await self.ensure_ready_session(
+            nanobot_side_session_key=nanobot_side_session_key,
+        )
+        return await self.apply_explicit_selection_safe(
+            nanobot_side_session_key=nanobot_side_session_key,
+            acp_side_session_id=acp_side_session_id,
+            model_id=model_id,
+        )
+
+    async def set_agent_safe(
+        self,
+        *,
+        nanobot_side_session_key: str,
+        agent_id: str,
+    ) -> SessionSelectionResult:
+        """安全设置会话代理：统一封装会话就绪、SDK 调用与失败恢复。"""
+
+        await self._runtime.ensure_connection()
+        acp_side_session_id = await self.ensure_ready_session(
+            nanobot_side_session_key=nanobot_side_session_key,
+        )
+        return await self.apply_explicit_selection_safe(
+            nanobot_side_session_key=nanobot_side_session_key,
+            acp_side_session_id=acp_side_session_id,
+            agent_id=agent_id,
+        )
 
     async def recover_after_set_failure(
         self,

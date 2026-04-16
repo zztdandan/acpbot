@@ -93,7 +93,7 @@ class CommandRouter:
                 return self._reply(
                     ctx, "invalid input, Usage: /set_model <model_id>", ACP_META_RENDER_AS_TEXT
                 )
-            result = await self._runtime.set_model_safe(
+            result = await self._runtime.session_runtime_manager.set_model_safe(
                 nanobot_side_session_key=ctx.nanobot_side_session_key,
                 model_id=arg,
             )
@@ -109,7 +109,7 @@ class CommandRouter:
                 return self._reply(
                     ctx, "invalid input, Usage:  /set_agent <agent_id>", ACP_META_RENDER_AS_TEXT
                 )
-            result = await self._runtime.set_agent_safe(
+            result = await self._runtime.session_runtime_manager.set_agent_safe(
                 nanobot_side_session_key=ctx.nanobot_side_session_key,
                 agent_id=arg,
             )

@@ -31,7 +31,6 @@ from nanobot.acp.runtime_models import (
     RequestSource,
     RequestStatus,
     RuntimeWaitEntry,
-    SessionSelectionResult,
     StopResult,
 )
 from nanobot.acp.runtime_process_manager import ProcessRuntimeManager
@@ -599,42 +598,6 @@ class ACPRuntime:
         if caps is None:
             return "No agent/mode catalog returned by current ACP backend for this session."
         return caps.render_agents_command()
-
-    async def set_model_safe(
-        self,
-        *,
-        nanobot_side_session_key: str,
-        model_id: str,
-    ) -> SessionSelectionResult:
-        """安全设置会话模型：统一封装会话就绪、SDK 调用与失败恢复。"""
-
-        await self.ensure_connection()
-        acp_side_session_id = await self.session_runtime_manager.ensure_ready_session(
-            nanobot_side_session_key=nanobot_side_session_key,
-        )
-        return await self.session_runtime_manager.apply_explicit_selection_safe(
-            nanobot_side_session_key=nanobot_side_session_key,
-            acp_side_session_id=acp_side_session_id,
-            model_id=model_id,
-        )
-
-    async def set_agent_safe(
-        self,
-        *,
-        nanobot_side_session_key: str,
-        agent_id: str,
-    ) -> SessionSelectionResult:
-        """安全设置会话代理：统一封装会话就绪、SDK 调用与失败恢复。"""
-
-        await self.ensure_connection()
-        acp_side_session_id = await self.session_runtime_manager.ensure_ready_session(
-            nanobot_side_session_key=nanobot_side_session_key,
-        )
-        return await self.session_runtime_manager.apply_explicit_selection_safe(
-            nanobot_side_session_key=nanobot_side_session_key,
-            acp_side_session_id=acp_side_session_id,
-            agent_id=agent_id,
-        )
 
 
 class ACPDispatcher(ACPRuntime):
