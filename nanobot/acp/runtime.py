@@ -145,17 +145,16 @@ class ACPRuntime:
             await self.observability_manager.start()
 
     async def await_acp_prompt(self, **kwargs: object) -> None:
-        """ACP 连接健康检查：调用 prompt 并等待响应，用于 ensure_connection 探测 Agent 就绪。
+        """调用单次 ACP prompt 并等待完成。
 
         处理流程：
             - 检查 _acp_client_conn 可用性（否则 RuntimeError）；
-            - 以 max(30, startup_timeout_seconds) 为上限 asyncio.wait_for 包装 prompt 调用。
+            - 直接 await prompt 调用，不在 runtime 层附加固定超时。
         """
         if self._acp_client_conn is None:
             raise RuntimeError("ACP connection is not available")
-        timeout = max(30, self.acp_config.startup_timeout_seconds)
         prompt_callable = cast(Callable[..., Awaitable[None]], self._acp_client_conn.prompt)
-        await asyncio.wait_for(prompt_callable(**kwargs), timeout=timeout)
+        await prompt_callable(**kwargs)
 
     def register_wait_entry(
         self,
