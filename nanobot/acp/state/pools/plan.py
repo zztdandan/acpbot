@@ -10,7 +10,7 @@ class PlanPool(ACPPoolBase):
     """计划池：保存当前计划的完整快照，并在变更时输出摘要。"""
 
     bucket_type = ACPBucketType.PLAN
-    idle_timeout_seconds: float | None = 0.8
+    idle_timeout_seconds: float | None = 1.6
 
     def __init__(self, *, bucket_key: str) -> None:
         """建立计划池；一个请求内通常只需一个当前计划快照。"""

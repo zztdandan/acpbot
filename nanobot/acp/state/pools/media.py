@@ -11,7 +11,7 @@ class MediaPool(ACPPoolBase):
     """媒体池：收集归一化媒体资源，并按新增本地路径刷新给外部。"""
 
     bucket_type = ACPBucketType.MEDIA
-    idle_timeout_seconds: float | None = 0.8
+    idle_timeout_seconds: float | None = 1.6
 
     def __init__(self, *, bucket_key: str) -> None:
         """建立媒体池；池键用于区分不同来源的媒体流。"""

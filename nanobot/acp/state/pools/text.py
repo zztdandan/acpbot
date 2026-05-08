@@ -68,7 +68,7 @@ class MessageTextPool(_TextStreamPool):
     """普通文本池：聚合消息正文文本并对外镜像为标准文本片段。"""
 
     bucket_type = ACPBucketType.MESSAGE_TEXT
-    idle_timeout_seconds: float | None = 0.5
+    idle_timeout_seconds: float | None = 1.0
 
     def __init__(self, *, bucket_key: str) -> None:
         """建立普通文本池；适用于 `agent_message_chunk/text`。"""
@@ -80,7 +80,7 @@ class ThoughtPool(_TextStreamPool):
     """思考文本池：聚合思考文本，并通过元数据标记思考语义。"""
 
     bucket_type = ACPBucketType.THOUGHT
-    idle_timeout_seconds: float | None = 0.8
+    idle_timeout_seconds: float | None = 1.6
 
     def __init__(self, *, bucket_key: str) -> None:
         """建立思考池；供思考处理器独立收口。"""
