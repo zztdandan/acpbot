@@ -338,8 +338,8 @@ async def test_e2e_progress_router_ws_scenario_b_permission_reply_and_timeout() 
 
 
 @pytest.mark.asyncio
-async def test_e2e_progress_router_ws_scenario_c_models_and_agents_commands() -> None:
-    """Scenario C: verify WS `/models` and `/agents` return direct final responses."""
+async def test_e2e_progress_router_ws_scenario_c_models_and_removed_agents_commands() -> None:
+    """Scenario C: verify WS `/models` works and removed `/agents` returns unknown."""
 
     require_e2e_enabled()
     ws_uri, ws_token = _ws_endpoint()
@@ -376,8 +376,8 @@ async def test_e2e_progress_router_ws_scenario_c_models_and_agents_commands() ->
                 command_text="/agents",
             )
             agents_content = str(agents_final.get("content") or "").strip()
-            assert agents_content, "Expected non-empty /agents response content"
-            assert "Unknown ACP slash command" not in agents_content
+            assert agents_content, "Expected non-empty /agents unknown-command response content"
+            assert agents_content == "Unknown ACP slash command: /agents"
             agents_meta = agents_final.get("metadata")
             assert isinstance(agents_meta, dict)
             assert agents_meta.get("kind") == "command"
