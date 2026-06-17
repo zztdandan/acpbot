@@ -20,11 +20,40 @@ TESTS_ROOT = Path(__file__).resolve().parent
 CONFIG_TEMPLATE_PATH = TESTS_ROOT / "config.real_backend.template.json"
 SESSION_MAP_TEMPLATE_PATH = TESTS_ROOT / "session_map.real_fixture.json"
 SESSION_MAP_RELATIVE_PATH = Path("acp") / "session_map.json"
-TARGET_AGENT_ID = "build"
 PREFERRED_RCODE_OPENAI_MODEL = "RCode_OpenAI/gpt-5.4"
 STALE_SESSION_ID = "ses_sessionmap_stale_for_reconcile_check"
 TARGET_SESSION_KEY = "nanobot-sessionmap-target"
 TARGET_SESSION_ID = "ses_279d9764affemAyT25zOD33zuU"
+OPENCODE_DEEPSEEK_PRO_MODEL = "deepseek/deepseek-v4-pro"
+OPENCODE_DEEPSEEK_FLASH_MODEL = "deepseek/deepseek-v4-flash"
+
+
+@dataclass(frozen=True, slots=True)
+class ACPBackendUnderTest:
+    """真实 ACP 后端配置描述。"""
+
+    name: str
+    command: str
+    args: tuple[str, ...]
+    default_model: str
+
+
+BACKENDS_UNDER_TEST: dict[str, ACPBackendUnderTest] = {
+    "opencode": ACPBackendUnderTest(
+        name="opencode",
+        command="opencode",
+        args=("acp", "--print-logs", "--log-level", "WARN"),
+        default_model=OPENCODE_DEEPSEEK_PRO_MODEL,
+    ),
+    "hermes": ACPBackendUnderTest(
+        name="hermes",
+        command="hermes",
+        args=("acp",),
+        # 中文注释：defaultModel 仅用于 nanobot 配置兜底；Hermes 当前真实 ACP
+        # new_session payload 不返回 models/configOptions，不能据此假设可切换。
+        default_model=OPENCODE_DEEPSEEK_PRO_MODEL,
+    ),
+}
 
 
 @dataclass(slots=True)
@@ -36,7 +65,6 @@ class RealSessionSeed:
     target_session_id: str
     target_session_key: str
     target_model_id: str
-    target_agent_id: str | None
 
 
 class _ACPCallbackSink:
@@ -44,16 +72,14 @@ class _ACPCallbackSink:
 
 
 @asynccontextmanager
-async def open_real_backend_connection() -> AsyncIterator[Any]:
-    """直接用 python-sdk 拉起 opencode ACP，获取真实 session 数据。"""
+async def open_real_backend_connection(backend: str = "opencode") -> AsyncIterator[Any]:
+    """直接用 python-sdk 拉起真实 ACP backend，获取 session/capability 数据。"""
 
+    backend_spec = BACKENDS_UNDER_TEST[backend]
     connection_cm = spawn_agent_process(
         cast(Any, _ACPCallbackSink()),
-        "opencode",
-        "acp",
-        "--print-logs",
-        "--log-level",
-        "WARN",
+        backend_spec.command,
+        *backend_spec.args,
         cwd=str(HARNESS_ROOT),
     )
     pair = await connection_cm.__aenter__()
@@ -157,7 +183,7 @@ async def discover_real_session_seed() -> RealSessionSeed:
     if TARGET_SESSION_ID not in fixture_session_ids:
         pytest.skip("Checked-in sessionmap fixture does not contain the configured target session")
 
-    async with open_real_backend_connection() as conn:
+    async with open_real_backend_connection("opencode") as conn:
         # 说明：真实后端 list_sessions 在部分环境下只返回窗口化结果，
         # 仅凭列表缺失会把“可 restore 的老会话”误判为 stale。
         # 这里改为逐个探测 fixture session 是否可 restore，作为存在性真值来源。
@@ -179,16 +205,7 @@ async def discover_real_session_seed() -> RealSessionSeed:
         if target_model_id is None:
             pytest.skip("Real sessionmap tests require an available RCode_OpenAI model")
 
-        modes = getattr(target_payload, "modes", None)
-        available_modes = getattr(modes, "available_modes", None) or []
-        available_mode_ids = {
-            mode_id
-            for entry in available_modes
-            if isinstance((mode_id := getattr(entry, "id", None)), str) and mode_id
-        }
-        # 真实后端可用 mode 会随环境波动；这里只在存在 build 时记录，
-        # 具体断言由各测试按需决定，避免让所有 real-session 用例一起被 skip。
-        target_agent_id = TARGET_AGENT_ID if TARGET_AGENT_ID in available_mode_ids else None
+        # 中文注释：STAGE1 起 real session seed 只采集 model；mode/agent 不再是用户选择体系。
 
         return RealSessionSeed(
             session_ids=fixture_session_ids,
@@ -196,14 +213,22 @@ async def discover_real_session_seed() -> RealSessionSeed:
             target_session_id=TARGET_SESSION_ID,
             target_session_key=TARGET_SESSION_KEY,
             target_model_id=target_model_id,
-            target_agent_id=target_agent_id,
         )
 
 
-def write_runtime_config(tmp_path: Path) -> Path:
-    """复制最小测试配置；config-root 落到 tmp_path，避免污染真实 .nanobot。"""
+def write_runtime_config(
+    tmp_path: Path,
+    *,
+    backend: str = "opencode",
+    default_model: str | None = None,
+) -> Path:
+    """复制最小测试配置，并允许按真实 backend 覆盖 command/args/defaultModel。"""
 
     data = json.loads(CONFIG_TEMPLATE_PATH.read_text(encoding="utf-8"))
+    backend_spec = BACKENDS_UNDER_TEST[backend]
+    data.setdefault("dispatch", {}).setdefault("acp", {})["command"] = backend_spec.command
+    data["dispatch"]["acp"]["args"] = list(backend_spec.args)
+    data["dispatch"]["acp"]["defaultModel"] = default_model or backend_spec.default_model
     config_path = tmp_path / "config.real_backend.json"
     config_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return config_path

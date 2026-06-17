@@ -198,7 +198,7 @@ class StopResult:
 
 @dataclass(slots=True)
 class SessionSelectionResult:
-    """会话 model/agent 切换结果。
+    """会话 model 切换结果。
 
     约定：
         - success=True 表示 set 操作已生效并同步到本地能力缓存与持久化绑定
@@ -206,7 +206,7 @@ class SessionSelectionResult:
     """
 
     success: bool
-    target: Literal["model", "agent"]
+    target: Literal["model"]
     value: str
     reason: str
     acp_side_session_id: str | None = None

@@ -78,7 +78,8 @@ class SessionMapBindingManager:
         updated_at = raw.get("updatedAt")
         revision = raw.get("revision")
         bound_model = raw.get("boundModel")
-        bound_agent = raw.get("boundAgent")
+        # 中文注释：阶段 1 兼容读取旧 boundAgent 字段，但运行时不再使用。
+        _legacy_bound_agent = raw.get("boundAgent")
 
         if not isinstance(cwd, str) or not cwd:
             raise ValueError("session map entry cwd is invalid")
@@ -96,7 +97,7 @@ class SessionMapBindingManager:
             nanobot_side_session_key=nanobot_side_session_key,
             acp_side_session_id=acp_side_session_id,
             bound_model=bound_model if isinstance(bound_model, str) and bound_model else None,
-            bound_agent=bound_agent if isinstance(bound_agent, str) and bound_agent else None,
+            bound_agent=None,
             updated_at=updated_at,
             revision=revision,
         )
@@ -129,12 +130,10 @@ class SessionMapBindingManager:
         entry = self._entries.get(nanobot_side_session_key)
         return entry.acp_side_session_id if entry is not None else None
 
-    def get_bound_selection(self, nanobot_side_session_key: str) -> tuple[str | None, str | None]:
-        """返回 (bound_model, bound_agent)。"""
+    def get_bound_model(self, nanobot_side_session_key: str) -> str | None:
+        """返回当前绑定的 model；旧 boundAgent 不再参与运行时选择。"""
         entry = self._entries.get(nanobot_side_session_key)
-        if entry is None:
-            return None, None
-        return entry.bound_model, entry.bound_agent
+        return entry.bound_model if entry is not None else None
 
     def iter_entries(self) -> list[SessionMapBindingEntry]:
         """返回按 key 排序的条目列表（快照）。"""
@@ -202,30 +201,15 @@ class SessionMapBindingManager:
         entry.updated_at = _now_iso_with_tz()
         self.persist()
 
-    def update_bound_agent(self, nanobot_side_session_key: str, agent: str) -> None:
-        """更新 bound_agent，revision+1，persist。幂等（agent 未变时跳过）。"""
-        entry = self._entries.get(nanobot_side_session_key)
-        if entry is None or entry.bound_agent == agent:
-            return
-        entry.bound_agent = agent
-        entry.revision += 1
-        entry.updated_at = _now_iso_with_tz()
-        self.persist()
+    def clear_bound_model(self, nanobot_side_session_key: str) -> None:
+        """清空 bound_model，确保不会把失效模型继续持久化。
 
-    def clear_bound_selection(self, nanobot_side_session_key: str) -> None:
-        """清空 bound_model/bound_agent，确保不会把失效选择继续持久化。
-
-        行为约束：
-            - 仅在条目存在且至少一个字段非空时才 revision+1 并落盘
-            - 两个字段都已为空时幂等返回，避免无意义写盘
+        中文注释：旧 boundAgent 即使在磁盘存在，也只在读取时兼容忽略；写回不再输出。
         """
         entry = self._entries.get(nanobot_side_session_key)
-        if entry is None:
-            return
-        if entry.bound_model is None and entry.bound_agent is None:
+        if entry is None or entry.bound_model is None:
             return
         entry.bound_model = None
-        entry.bound_agent = None
         entry.revision += 1
         entry.updated_at = _now_iso_with_tz()
         self.persist()

@@ -27,7 +27,7 @@ class SessionMapBindingEntry:
 
     使用场景：
         - 启动时从磁盘加载所有绑定，与 ACP 侧会话列表对账
-        - 会话建立/切换时创建新绑定或更新现有绑定
+        - 会话建立/模型切换时创建新绑定或更新现有绑定
         - 会话失效时删除绑定（保留历史记录，只标记为删除）
 
     属性说明：
@@ -35,13 +35,13 @@ class SessionMapBindingEntry:
         nanobot_side_session_key: nanobot 侧会话标识，格式通常为 "user_id:chat_id" 或 "cli:direct"
         acp_side_session_id: ACP 侧会话标识，由 ACP 后端生成的唯一字符串
         bound_model: 当前绑定的模型 ID（如 "gpt-4"），None 表示未绑定
-        bound_agent: 当前绑定的代理 ID（如 "code-assistant"），None 表示未绑定
+        bound_agent: 旧版本兼容字段；运行时不再读取，写回时不再输出 boundAgent
         updated_at: 最后更新时间（ISO 8601 格式），用于调试与清理策略
         revision: 版本号，用于乐观并发控制；每次更新 revision+，避免并发写入冲突
 
     生命周期：
         - 创建：ensure_ready_session 成功建立会话后初始化（revision=1）
-        - 更新：切换模型/代理时 increment revision（用于检测并发修改）
+        - 更新：切换模型时 increment revision（用于检测并发修改）
         - 删除：clear_binding 时从字典中移除，不直接修改本对象
     """
 
@@ -58,7 +58,7 @@ class SessionMapBindingEntry:
 
         处理流程：
             1. 构建基础 payload（必填字段：cwd/key/acp_id/updated_at/revision）
-            2. 过滤 None 值的可选字段（bound_model/bound_agent）
+            2. 仅输出非空 bound_model；bound_agent 兼容字段不再写回
             3. 返回符合 schema version 2 的字典（camelCase 命名）
 
         返回：
@@ -71,11 +71,10 @@ class SessionMapBindingEntry:
             "updatedAt": self.updated_at,
             "revision": self.revision,
         }
-        # 可选字段：为 None 时不输出（精简 JSON）
+        # 可选字段：为 None 时不输出（精简 JSON）。boundAgent 阶段 1 起不再写回，
+        # 避免继续持久化已删除的 agent/mode 用户体系。
         if self.bound_model:
             payload["boundModel"] = self.bound_model
-        if self.bound_agent:
-            payload["boundAgent"] = self.bound_agent
         return payload
 
 
@@ -91,7 +90,7 @@ class SessionRuntimeEntry:
         nanobot_side_session_key: nanobot 侧会话标识，用于反向查找 ACP 侧会话 ID
         acp_side_session_id: ACP 侧会话标识，用于调用 ACP API 时指定目标会话
         ready: 会话是否就绪（True 表示可以正常使用，False 表示正在恢复中）
-        capabilities: 会话能力缓存对象（_SessionCapabilities），存储当前可用模型/代理列表与当前选择
+        capabilities: 会话能力缓存对象（_SessionCapabilities），存储当前可用模型列表与当前选择
 
     生命周期：
         - 创建：ensure_ready_session 成功激活会话后实例化（ready=True）

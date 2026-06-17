@@ -179,7 +179,7 @@ class ProcessRuntimeManager:
         """单请求全生命周期：激活会话 → 构建状态 → 执行 process_direct → 清理回收。
 
         处理流程：
-            - 从 metadata 提取 preferred_model/agent，调用 ensure_ready_session 激活会话；
+            - 从 metadata 提取 preferred_model，调用 ensure_ready_session 激活会话；
             - 创建 SessionStateManager + ProgressRouter，构建 ActiveProcessEntry 并注册双索引；
             - 状态置 ACTIVE，上报 REQUEST_ACTIVE 可观测事件；
             - 调用 execute_process_request 驱动 process_direct 执行链路。
@@ -198,11 +198,9 @@ class ProcessRuntimeManager:
         error: Exception | None = None
         try:
             preferred_model = process_request.metadata.get("_acp_session_model")
-            preferred_agent = process_request.metadata.get("_acp_session_agent")
             acp_side_session_id = await self._runtime.session_runtime_manager.ensure_ready_session(
                 nanobot_side_session_key=process_request.nanobot_side_session_key,
                 preferred_model=preferred_model if isinstance(preferred_model, str) else None,
-                preferred_agent=preferred_agent if isinstance(preferred_agent, str) else None,
             )
             state_manager = SessionStateManager(
                 runtime=self._runtime,
