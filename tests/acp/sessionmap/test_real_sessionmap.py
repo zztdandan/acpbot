@@ -106,7 +106,7 @@ async def test_ensure_ready_session_replays_bound_model_after_restore(
     2. 启动期已完成一次 reconcile 后，本次 ensure 直接从 binding truth 查目标映射，不再重新做 load+reconcile。
     3. 不再通过 resume/load 回读验证，避免验证动作本身重建 ACP session 状态。
     4. 直接向当前 ready session 提问，并要求 ACP 仅返回规范 JSON，确认本轮实际使用 model。
-    5. agent 当前无法稳定自报 mode，因此这里仅对 model 做 ACP 侧验证。
+    5. STAGE1 已删除 agent/mode 用户选择体系，因此这里只对 model 做 ACP 侧验证。
     """
 
     seed = await discover_real_session_seed()
@@ -138,8 +138,6 @@ async def test_ensure_ready_session_replays_bound_model_after_restore(
         )
         assert runtime_entry.acp_side_session_id == seed.target_session_id
         assert runtime_entry.capabilities.current_model == seed.target_model_id
-        if seed.target_agent_id is not None:
-            assert runtime_entry.capabilities.current_agent == seed.target_agent_id
         assert (
             runtime.session_runtime_manager.get_by_acp_side_session_id(seed.target_session_id)
             is runtime_entry
@@ -176,22 +174,14 @@ async def test_ensure_ready_session_replays_bound_model_after_restore(
         assert capabilities is not None
         assert capabilities.current_model == seed.target_model_id
         assert seed.target_model_id in capabilities.available_models
-        if seed.target_agent_id is not None:
-            assert capabilities.current_agent == seed.target_agent_id
-            assert seed.target_agent_id in capabilities.available_agents
-
         assert capabilities is not None
         prompt_metadata = capabilities.build_prompt_metadata()
         models_command = capabilities.render_models_command()
-        agents_command = capabilities.render_agents_command()
 
         assert prompt_metadata["nanobot_session_model"] == seed.target_model_id
+        assert "nanobot_session_agent" not in prompt_metadata
         assert f"Current model: {seed.target_model_id}" in models_command
         assert seed.target_model_id in models_command
-        if seed.target_agent_id is not None:
-            assert prompt_metadata["nanobot_session_agent"] == seed.target_agent_id
-            assert f"Current agent: {seed.target_agent_id}" in agents_command
-            assert seed.target_agent_id in agents_command
     finally:
         await close_runtime_quietly(runtime)
         set_config_path(previous_config_path)
