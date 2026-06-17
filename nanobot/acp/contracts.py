@@ -29,6 +29,7 @@ ACP_META_PERMISSION_REQUEST_ID = "permission_request_id"
 # 几个固定渲染者
 ACP_META_KIND_PERMISSION = "permission"
 ACP_META_KIND_FINAL = "final"
+ACP_META_KIND_COMMAND = "command"
 ACP_META_RENDER_AS_PERMISSION_REQUEST = "permission_request"
 ACP_META_RENDER_AS_PERMISSION_REPLY = "permission_reply"
 ACP_META_RENDER_AS_FINAL = "final"

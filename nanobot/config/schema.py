@@ -384,6 +384,7 @@ class ACPBackendConfig(Base):
     startup_timeout_seconds: int = 20
     inbound_media_dir: str = "Download/channel-inbound/acp-dispatch"
     default_model: str = "xaio/Kimi-K2.5"
+    # 中文注释：旧配置项仅为兼容已有配置文件保留，ACP runtime 不再读取或应用。
     default_mode: str = "OpenCode-Builder"
     permission_timeout_seconds: int = 90
     progress_text_idle_seconds: float = 1.0

@@ -286,14 +286,13 @@ class ACPRuntime:
         chat_id: str = ACPDirectIdentity.CHAT_ID.value,
         media: list[str] | None = None,
         preferred_model: str | None = None,
-        preferred_agent: str | None = None,
         on_progress: Callable[[str], Awaitable[None]] | None = None,
     ) -> OutboundMessage:
         """CLI/直接调用主入口：构造请求、注册等待链、委托 inbound_manager 并 await 最终结果。
 
         处理流程：
             - 启动可观测性 → new_request_key → register_wait_entry；
-            - 将 preferred_model/agent 注入 metadata，构造 ProcessDirectInput；
+            - 将 preferred_model 注入 metadata，构造 ProcessDirectInput；
             - 委托 inbound_manager.handle_process_direct 发至 ACP；
             - await wait_entry.done_future 获取最终 OutboundMessage；
             - finally 中 remove_wait_entry。"""
@@ -310,7 +309,6 @@ class ACPRuntime:
                 media=list(media or []),
                 metadata={
                     **({"_acp_session_model": preferred_model} if preferred_model else {}),
-                    **({"_acp_session_agent": preferred_agent} if preferred_agent else {}),
                 },
                 on_progress=on_progress,
             )
@@ -591,12 +589,6 @@ class ACPRuntime:
             return "No model catalog returned by current ACP backend for this session."
         return caps.render_models_command()
 
-    async def list_agents_command(self, acp_side_session_id: str) -> str:
-        """渲染 /agents 命令结果：委托 session capability 输出代理列表。"""
-        caps = self.session_runtime_manager.get_session_capabilities(acp_side_session_id)
-        if caps is None:
-            return "No agent/mode catalog returned by current ACP backend for this session."
-        return caps.render_agents_command()
 
 
 class ACPDispatcher(ACPRuntime):

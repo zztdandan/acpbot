@@ -6,10 +6,11 @@ from typing import TYPE_CHECKING
 
 from nanobot.acp.contracts import (
     ACP_META_KIND,
+    ACP_META_KIND_COMMAND,
     ACP_META_PROGRESS,
     ACP_META_RENDER_AS,
+    ACP_META_RENDER_AS_COMMAND,
     ACP_META_RENDER_AS_LIST,
-    ACP_META_RENDER_AS_NORENDER,
     ACP_META_RENDER_AS_TEXT,
 )
 from nanobot.acp.runtime_models import InboundContext
@@ -24,7 +25,7 @@ class CommandRouter:
 
     职责：
         - 在入站阶段拦截 ACP slash 命令，避免普通文本继续进入执行链路
-        - 调用 runtime/sessionmap/session manager 完成 `/new`、`/stop`、`/models`、`/agents` 等操作
+        - 调用 runtime/sessionmap/session manager 完成 `/new`、`/stop`、`/models` 等操作
     """
 
     HELP_TEXT = (
@@ -33,9 +34,7 @@ class CommandRouter:
         "/stop — Stop the current task\n"
         "/help — Show available commands\n"
         "/models — List available/current models\n"
-        "/set_model <model_id> — Switch model\n"
-        "/agents — List available/current agents\n"
-        "/set_agent <agent_id> — Switch agent"
+        "/set_model <model_id> — Switch model"
     )
 
     def __init__(self, *, runtime: ACPRuntime) -> None:
@@ -82,12 +81,6 @@ class CommandRouter:
             )
             content = await self._runtime.list_models_command(acp_side_session_id)
             return self._reply(ctx, content, ACP_META_RENDER_AS_LIST)
-        if command == "/agents":
-            acp_side_session_id = await self._runtime.session_runtime_manager.ensure_ready_session(
-                nanobot_side_session_key=ctx.nanobot_side_session_key,
-            )
-            content = await self._runtime.list_agents_command(acp_side_session_id)
-            return self._reply(ctx, content, ACP_META_RENDER_AS_LIST)
         if command == "/set_model":
             if not arg:
                 return self._reply(
@@ -100,26 +93,10 @@ class CommandRouter:
             if not result.success:
                 return self._reply(
                     ctx,
-                    f"Model switch failed: {arg}. reason={result.reason}. Session selection reset and session resumed.",
+                    f"Model switch failed: {arg}. reason={result.reason}.",
                     ACP_META_RENDER_AS_TEXT,
                 )
             return self._reply(ctx, f"Model switched to: {arg}")
-        if command == "/set_agent":
-            if not arg:
-                return self._reply(
-                    ctx, "invalid input, Usage:  /set_agent <agent_id>", ACP_META_RENDER_AS_TEXT
-                )
-            result = await self._runtime.session_runtime_manager.set_agent_safe(
-                nanobot_side_session_key=ctx.nanobot_side_session_key,
-                agent_id=arg,
-            )
-            if not result.success:
-                return self._reply(
-                    ctx,
-                    f"Agent switch failed: {arg}. reason={result.reason}. Session selection reset and session resumed.",
-                    ACP_META_RENDER_AS_TEXT,
-                )
-            return self._reply(ctx, f"Agent switched to: {arg}")
         if command == "/stop":
             result = await self._runtime.stop_session(
                 nanobot_side_session_key=ctx.nanobot_side_session_key,
@@ -137,20 +114,21 @@ class CommandRouter:
         return self._reply(ctx, f"Unknown ACP slash command: {command}", ACP_META_RENDER_AS_TEXT)
 
     @staticmethod
-    def _reply(ctx: InboundContext, content: str, render_as=None) -> OutboundMessage:
-        """构造命令直返消息；统一复用当前上下文的 channel 与 chat_id。"""
+    def _reply(ctx: InboundContext, content: str, render_as: str | None = None) -> OutboundMessage:
+        """构造命令直返消息；统一复用当前上下文的 channel 与 chat_id。
+
+        中文注释：命令回包默认使用 command render；调用方显式传 text/list 时覆盖默认值，
+        这样用户路径上的 `/help`、`/models` 能携带更精确的渲染提示。
+        """
         command_reply_outbound = OutboundMessage(
             channel=ctx.channel,
             chat_id=ctx.chat_id,
             content=content,
         )
         command_reply_outbound.metadata = {
-            ACP_META_KIND: "command",
-            ACP_META_RENDER_AS: "command",
+            ACP_META_KIND: ACP_META_KIND_COMMAND,
+            ACP_META_RENDER_AS: render_as or ACP_META_RENDER_AS_COMMAND,
             ACP_META_PROGRESS: False,
         }
-        if render_as is None:
-            #  不指定渲染者的话默认建议不渲染这个回调
-            command_reply_outbound.metadata[ACP_META_RENDER_AS] = ACP_META_RENDER_AS_NORENDER
 
         return command_reply_outbound

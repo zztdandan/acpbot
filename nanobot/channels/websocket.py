@@ -87,7 +87,7 @@ class WebSocketChannel(BaseChannel):
         self._connection_queues: dict[Any, asyncio.Queue[_OutboundFrame]] = {}
         self._writer_tasks: dict[Any, asyncio.Task[None]] = {}
         self._connection_principals: dict[Any, str] = {}
-        # 中文注释：记录连接首帧传入的 ACP 会话偏好（agent/model），供首次建会话时透传。
+        # 中文注释：记录连接首帧传入的 ACP model 偏好，供首次建会话时透传；旧 agent 字段忽略。
         self._connection_acp_preferences: dict[Any, dict[str, str]] = {}
         self._current_chat: dict[Any, str] = {}
         # 中文注释：chat_id -> 订阅连接集合，用于多人并发与多会话并存场景。
@@ -378,14 +378,11 @@ class WebSocketChannel(BaseChannel):
         if not self.is_allowed(principal):
             await connection.close(code=1008, reason="principal not allowed")
             return None
-        # 中文注释：首帧可选携带 agent/model；仅记录非空字符串，后续按“首帧优先，default 回落”策略使用。
+        # 中文注释：首帧仅保留 model 偏好；agent/mode 用户体系已删除，旧 agent 字段忽略。
         model = str(data.get("model") or "").strip()
-        agent = str(data.get("agent") or "").strip()
         prefs: dict[str, str] = {}
         if model:
             prefs["model"] = model
-        if agent:
-            prefs["agent"] = agent
         self._connection_acp_preferences[connection] = prefs
         return principal
 
@@ -510,9 +507,6 @@ class WebSocketChannel(BaseChannel):
             prefs = self._connection_acp_preferences.get(connection, {})
             if prefs.get("model"):
                 metadata["_acp_session_model"] = prefs["model"]
-            if prefs.get("agent"):
-                metadata["_acp_session_agent"] = prefs["agent"]
-
             await self._handle_message(
                 sender_id=self._connection_principals.get(connection, "unknown"),
                 chat_id=chat_id,
